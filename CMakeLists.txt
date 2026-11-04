@@ -4,7 +4,7 @@ if(NOT ESP_PLATFORM)
 endif()
 
 idf_component_register(
-    SRCS "core/src/crc32.c"
+    SRCS "core/src/crc32.c" "core/src/wire.c" "core/src/record.c" "core/src/segment.c" "core/src/batch.c"
     INCLUDE_DIRS "core/include"
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)

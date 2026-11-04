@@ -1,6 +1,6 @@
 [package]
 name = "micromeerschaum"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "MicroMeerschaum receiver: decode device batches, deduplicate by origin and sequence, and advance ack cursors."

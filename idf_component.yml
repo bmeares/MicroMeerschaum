@@ -1,4 +1,4 @@
-version: "0.0.1"
+version: "0.1.0"
 description: "MicroMeerschaum device core: journal, sync and acknowledgement protocol for Meerschaum pipes."
 url: "https://github.com/bmeares/MicroMeerschaum"
 license: "Apache-2.0"
