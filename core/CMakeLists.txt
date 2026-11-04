@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.16)
+project(micromeerschaum_core C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+option(MM_SANITIZE "Build host tests with ASan and UBSan" ON)
+
+add_library(micromeerschaum src/crc32.c)
+target_include_directories(micromeerschaum PUBLIC include)
+target_compile_options(micromeerschaum PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Werror)
+
+enable_testing()
+add_executable(test_vectors tests/test_vectors.c)
+target_link_libraries(test_vectors PRIVATE micromeerschaum)
+target_compile_options(test_vectors PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(test_vectors PRIVATE MM_VECTORS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../vectors")
+if(MM_SANITIZE)
+    foreach(target micromeerschaum test_vectors)
+        target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
+endif()
+add_test(NAME vectors COMMAND test_vectors)

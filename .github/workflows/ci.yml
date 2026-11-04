@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cmake -S core -B build -G "Unix Makefiles" -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build
+      - run: ctest --test-dir build --output-on-failure
+
+  receiver:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: receiver
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
