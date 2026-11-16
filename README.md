@@ -21,6 +21,10 @@ Rust receiver, and will change without notice.
 Planned: a C++ ESP-IDF wrapper, a MicroPython native module over the same
 core, and a Meerschaum plugin over the receiver crate.
 
+Proposed: [evaluate an existing device storage engine](spec/storage-engine-proposal.md),
+starting with FlashDB TSDB, to reduce custom storage and recovery code while
+keeping the portable wire core independent of the backend.
+
 ## Build and test
 
 ```bash
