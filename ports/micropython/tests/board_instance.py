@@ -4,7 +4,6 @@ import argparse
 import contextlib
 import json
 import os
-from pathlib import Path
 import pty
 import select
 import shutil
@@ -14,9 +13,9 @@ import tempfile
 import threading
 import time
 import tty
+from pathlib import Path
 
 from board import emulator, until
-
 
 APP = """from micromeerschaum import provision, expose, make_action
 from mm_session import DeviceSession, serve_usb
@@ -43,8 +42,8 @@ def provision_board(uart):
         "import _mmstorage\nfrom micromeerschaum import provision\n"
         "_mmstorage.mount(True)\n"
         "provision('sensor','readings','/mm/bench.mm',11,1,22,create=True).close()\n"
-        "with open('main.py','w') as f:\n    f.write(%r)\n"
-        "import os\nos.sync()\nprint('PROVISIONED')\n" % APP
+        f"with open('main.py','w') as f:\n    f.write({APP!r})\n"
+        "import os\nos.sync()\nprint('PROVISIONED')\n"
     ).encode()
     for i in range(0, len(code), 16):
         uart.sendall(code[i : i + 16])

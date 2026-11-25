@@ -2,9 +2,9 @@
 
 import argparse
 import gzip
+import tarfile
 from io import BytesIO
 from pathlib import Path
-import tarfile
 
 
 def add(tar, name, data, executable=False):
@@ -21,36 +21,36 @@ def package(output, library):
     with (
         output.open("wb") as file,
         gzip.GzipFile(filename="", fileobj=file, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w") as tar,
     ):
-        with tarfile.open(fileobj=gz, mode="w") as tar:
-            add(tar, "LICENSE", (root.parent / "LICENSE").read_bytes())
-            for name in ("plugin.toml", "README.md"):
-                add(tar, name, (plugin / name).read_bytes())
-            if library:
-                add(tar, library.name, library.read_bytes(), executable=True)
-                return
-            # The plugin must build after mrsm extracts it outside this repository.
-            manifest = (plugin / "Cargo.toml").read_text()
-            local_crate = 'micromeerschaum = { path = ".." }'
-            if manifest.count(local_crate) != 1:
-                raise ValueError("Expected a repository-local receiver crate")
-            add(
-                tar,
-                "Cargo.toml",
-                manifest.replace(
-                    local_crate, 'micromeerschaum = { path = "receiver" }'
-                ).encode(),
-            )
-            add(tar, "Cargo.lock", (plugin / "Cargo.lock").read_bytes())
-            add(tar, "receiver/Cargo.toml", (root / "Cargo.toml").read_bytes())
-            for base, prefix in ((plugin, ""), (root, "receiver/")):
-                for source in sorted((base / "src").rglob("*")):
-                    if source.is_file() and source.suffix in (".rs", ".py"):
-                        add(
-                            tar,
-                            prefix + source.relative_to(base).as_posix(),
-                            source.read_bytes(),
-                        )
+        add(tar, "LICENSE", (root.parent / "LICENSE").read_bytes())
+        for name in ("plugin.toml", "README.md"):
+            add(tar, name, (plugin / name).read_bytes())
+        if library:
+            add(tar, library.name, library.read_bytes(), executable=True)
+            return
+        # The plugin must build after mrsm extracts it outside this repository.
+        manifest = (plugin / "Cargo.toml").read_text()
+        local_crate = 'micromeerschaum = { path = ".." }'
+        if manifest.count(local_crate) != 1:
+            raise ValueError("Expected a repository-local receiver crate")
+        add(
+            tar,
+            "Cargo.toml",
+            manifest.replace(
+                local_crate, 'micromeerschaum = { path = "receiver" }'
+            ).encode(),
+        )
+        add(tar, "Cargo.lock", (plugin / "Cargo.lock").read_bytes())
+        add(tar, "receiver/Cargo.toml", (root / "Cargo.toml").read_bytes())
+        for base, prefix in ((plugin, ""), (root, "receiver/")):
+            for source in sorted((base / "src").rglob("*")):
+                if source.is_file() and source.suffix in (".rs", ".py"):
+                    add(
+                        tar,
+                        prefix + source.relative_to(base).as_posix(),
+                        source.read_bytes(),
+                    )
 
 
 if __name__ == "__main__":
