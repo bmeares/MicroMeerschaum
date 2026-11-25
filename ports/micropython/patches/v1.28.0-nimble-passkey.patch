@@ -3,7 +3,7 @@
 @@ -419,6 +419,16 @@
              return 0;
          }
- 
+
 +        case BLE_GAP_EVENT_PASSKEY_ACTION: {
 +            DEBUG_printf("commmon_gap_event_cb: passkey action: conn_handle=%d action=%d num=" UINT_FMT "\n", event->passkey.conn_handle, event->passkey.params.action, (mp_uint_t)event->passkey.params.numcmp);
 +
@@ -18,7 +18,7 @@
              DEBUG_printf("commmon_gap_event_cb: enc change: status=%d\n", event->enc_change.status);
              #if MICROPY_PY_BLUETOOTH_ENABLE_PAIRING_BONDING
 @@ -495,16 +505,6 @@
- 
+
              // Allow re-pairing.
              return BLE_GAP_REPEAT_PAIRING_RETRY;
 -        }
@@ -32,5 +32,5 @@
 -
 -            return 0;
          }
- 
+
          case BLE_GAP_EVENT_SUBSCRIBE: {
