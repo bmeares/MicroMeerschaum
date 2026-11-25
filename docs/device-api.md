@@ -4,7 +4,7 @@ The first release targets MicroPython and native ESP-IDF C/C++, including Arduin
 
 ## One temperature Pipe in two environments
 
-These examples show the proposed interface. Both applications have provisioned their local journal. The Python example uses the default node. The C++ example uses a handle to the application's configured node. The native type and function names are illustrative.
+Both applications use a provisioned local journal. The Python example uses the default node. The native example binds a named Pipe to the application's open journal.
 
 ```python
 from micromeerschaum import Pipe
@@ -14,11 +14,21 @@ ok, message = temperature.sync({"tick": [41, 42], "celsius": [21.4, 21.7]})
 ```
 
 ```cpp
-auto temperature = node.pipe("sensor", "temperature");
-const mm::Field first[]  = {{"tick", 41}, {"celsius", 21.4}};
-const mm::Field second[] = {{"tick", 42}, {"celsius", 21.7}};
-const mm::Row rows[] = {first, second};
-auto result = temperature.sync(rows);
+#include "micromeerschaum/pipe.hpp"
+#include "micromeerschaum/journal_pipe.h"
+
+mm_sync_result collect(mm_journal *journal)
+{
+    uint8_t scratch[128];
+    mm::Pipe temperature;
+    auto status = temperature.open("sensor", "temperature", nullptr,
+                                   mm_pipe_journal_target(journal), scratch, sizeof scratch);
+    if (status != MM_JOURNAL_OK) return {status, 0, 0, 0};
+    const mm_field first[] = {mm::field("tick", 41), mm::field("celsius", 21.4)};
+    const mm_field second[] = {mm::field("tick", 42), mm::field("celsius", 21.7)};
+    const mm_row rows[] = {mm::row(first), mm::row(second)};
+    return temperature.sync(rows);
+}
 ```
 
 Both calls submit the same two ordered observations to the same kind of local Pipe. Success means the observations can be recovered after restart. The writer may commit them together. A driver with its own compact binary format can submit a payload from a caller-owned buffer to the segment journal. The core assigns identity and frames it. The driver can reuse the buffer when synchronous submission returns. A driver that queues samples from an interrupt owns their storage until the writer consumes them. The application decides when to wake the radio and how much backlog to send. [Capture and delivery](peer-sync.md#capture-now-send-on-the-applications-schedule)
@@ -31,6 +41,24 @@ Both calls submit the same two ordered observations to the same kind of local Pi
 | Check results | Unpack `success, message` and inspect confirmed progress on partial writes. | Inspect an explicit status and confirmed input progress. The API works with the default ESP-IDF exception settings. |
 | Read and update local rows | On a qualified SQLite build, select `sql:local`, sync keyed updates, call `get_docs` and `get_sync_time`. | Perform the same operations with bounded native row views and the same SQLite transaction for rows and outgoing records. |
 | Send or receive a Pipe | Schedule delivery to a configured peer or API instance. | Use the same delivery contract from a firmware task. Either runtime can originate, receive or forward a stream. |
+
+## Try the native Pipe
+
+Build the host core and run the example twice against the same directory. Each invocation commits two new observations to the same stream. The C++ wrapper builds with exceptions disabled. [Runnable example](../examples/host/temperature.cpp)
+
+```sh
+cmake -S core -B build
+cmake --build build --target mm_temperature
+journal_dir=$(mktemp -d)
+./build/mm_temperature "$journal_dir"
+./build/mm_temperature "$journal_dir"
+```
+
+For C, form the provisioned stream key with `mm_pipe_key`, bind it with `mm_pipe_open`, and pass an array of `mm_row` to `mm_pipe_sync_rows`. Each row borrows an array of typed fields. Names and text carry their byte lengths. A row with zero fields writes an empty document. A batch with zero rows writes nothing. A driver can use `mm_pipe_sync_binary` with a provisioned binary stream and reuse its buffer on return. Provision the materializer with the matching payload profile. [C interface](../core/include/micromeerschaum/pipe.h) · [Document encoding](../spec/document-v1.md)
+
+Document sync groups up to eight rows that fit in the caller’s scratch buffer. Size it for at least the largest expected document and select a size appropriate to the target’s group limit. Restrict the call to one row for an individual commit. Pass acquisition metadata as the optional `mono_us` and `boot` arguments to the C++ wrapper or explicitly in C. To bind a compiled source, open a `plugin:weather` connector and call `bind_source("weather", fetch, context)`. Each `sync()` starts the callback index at zero and durably writes each returned row before requesting another. The source signals completion with `done = true`. Supplied frames bypass the source.
+
+The result’s `confirmed` counts the leading input rows committed by that call. On `MM_JOURNAL_UNCERTAIN`, reopen the same generation before reusing the handle. If `uncertain_count` is positive, compare the records beginning at `uncertain_first` with the corresponding original input, including its monotonic time, boot ID and exact payload. Account for matching rows before submitting the remaining suffix. Treat different bytes at an assigned identity as a conflict. The journal test injects a failed directory sync after publishing the second group and checks the candidate records after restart. [First-use and recovery test](../core/tests/test_pipe.cpp)
 
 ## What the implementations share
 
