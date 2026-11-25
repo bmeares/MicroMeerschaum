@@ -104,8 +104,9 @@ mm_status mm_document_encode(uint8_t *out, size_t cap, mm_row row, size_t *used)
 mm_status mm_document_decode(const uint8_t *buf, size_t len, mm_field *fields,
                              size_t capacity, size_t *count)
 {
-    if (!count || (!buf && len)) return MM_BAD_FIELD;
+    if (!count) return MM_BAD_FIELD;
     *count = 0;
+    if (!buf && len) return MM_BAD_FIELD;
     if (len > MM_RECORD_MAX_PAYLOAD) return MM_BAD_LENGTH;
     if (len < 6) return MM_TRUNCATED;
     if (memcmp(buf, magic, sizeof magic)) return MM_BAD_MAGIC;

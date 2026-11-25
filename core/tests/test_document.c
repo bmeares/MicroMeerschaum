@@ -7,8 +7,30 @@
 
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "line %d: %s\n", __LINE__, #c); exit(1); } } while (0)
 
+static void payload_boundary(void)
+{
+    static char text[MM_RECORD_MAX_PAYLOAD];
+    static uint8_t payload[MM_RECORD_MAX_PAYLOAD];
+    // A one-character name and text tag take thirteen framing bytes.
+    mm_field field = {{"x", 1}, {.type = MM_VALUE_TEXT,
+                                 .as.text = {text, MM_RECORD_MAX_PAYLOAD - 13}}};
+    mm_row row = {&field, 1};
+    size_t used, count = 1;
+    CHECK(mm_document_encode(payload, sizeof payload, row, &used) == MM_OK);
+    CHECK(used == MM_RECORD_MAX_PAYLOAD);
+    mm_field decoded;
+    CHECK(mm_document_decode(payload, used, &decoded, 1, &count) == MM_OK && count == 1);
+    CHECK(decoded.value.as.text.len == MM_RECORD_MAX_PAYLOAD - 13);
+    ++field.value.as.text.len;
+    CHECK(mm_document_encode(payload, sizeof payload, row, &used) == MM_BAD_LENGTH && used == 0);
+    CHECK(mm_document_decode(payload, sizeof payload, NULL, 0, &count) == MM_BAD_LENGTH && count == 0);
+    count = 1;
+    CHECK(mm_document_decode(NULL, 2, &decoded, 1, &count) == MM_BAD_FIELD && count == 0);
+}
+
 int main(void)
 {
+    payload_boundary();
     FILE *input = fopen(MM_VECTORS_DIR "/documents-v1.txt", "r");
     CHECK(input);
     char line[512], name[32], hex[384], expected[24];
