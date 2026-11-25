@@ -83,7 +83,7 @@ print(pipe.progress()["confirmed"])
 pipe.reclaim()
 ```
 
-A configured synchronous transport can also drive a copy. Register a function that sends a batch over the authenticated link and returns the receipt bytes. Set `cap` to a transfer size supported by both endpoints. Each call sends the full Pipe key and observations together.
+A configured synchronous transport can also drive a copy. The same API accepts an `api:name` instance for an authenticated HTTPS receiver. Register a function that sends a batch over the authenticated link and returns the receipt bytes. Set `cap` to a transfer size supported by both endpoints. Each call sends the full Pipe key and observations together.
 
 ```python
 from micromeerschaum import Pipe, provision_peer
@@ -95,6 +95,23 @@ ok, message = remote.sync({"tick": 43, "celsius": 21.9})
 ```
 
 A direct peer Pipe stages the rows in its matching default keep-old journal and succeeds after the destination acknowledges them. If the peer is offline or a reply is lost, `remote.staged_input` reports the durable local input count and `remote.confirmed_input` reports the confirmed remote input count. Call `remote.deliver()` after reconnecting to retry those identities. `pipe.copy_to()` requires a compatible, provisioned destination. It preserves original records and tracks the receiver's receipt. A sleeping peer never prevents a local journal Pipe from accepting supplied observations within its storage budget.
+
+## Query local rows with SQLite
+
+On a build with SQLite enabled, select `instance="sql:local"` and register the column names, types, extra key columns, and integer or timestamp axis. Every column entry is a tuple of `(name, type, is_extra_key)`. The axis is always part of the key. Supported types are `int`, `datetime`, `float`, `bool` and `string`.
+
+```python
+rows = provision("sensor", "temperature", "/mm/READINGS.DB", ORIGIN, GENERATION, DESTINATION,
+                 instance="sql:local", create=True, axis="tick",
+                 columns=(("tick", "int", False), ("station", "string", True),
+                          ("celsius", "float", False)))
+assert rows.sync({"tick": 1, "station": "A", "celsius": 20.0})[0]
+assert rows.sync({"tick": 1, "station": "A", "celsius": 20.5})[0]
+print(rows.get_docs(begin=1, end=2, params={"station": ["A"]}, limit=10))
+print(rows.get_sync_time(params={"station": "A"}))
+```
+
+Both observations enter the immutable outgoing stream. The keyed query returns the corrected row. Reopen with the same identifiers and instance, omitting `create`, `columns` and `axis` to load the saved registration. On a timestamp axis, supply query bounds in signed Unix microseconds. `get_sync_time()` returns integer ticks or Unix microseconds, and returns `None` for an empty selection. SQLite reclaims the acknowledged outgoing prefix within the receipt transaction. Current rows remain readable.
 
 ## Build and test on Unix
 
@@ -111,3 +128,14 @@ ports/micropython/tests/run.sh "$PWD/build/mm-unix/micropython"
 ```
 
 The suite commits and reopens both peer volumes, retries a lost receipt and compares original bytes. It also starts a stream in native C, reopens it in MicroPython and delivers the third reading, then repeats with the two runtimes reversed. [Executable integration tests](../ports/micropython/tests/run.sh)
+
+To include the optional SQLite target in the Unix build, compile the pinned engine first, then build a separate interpreter with its adapter enabled.
+
+```sh
+cmake -S core -B build/mm-sqlite -DMM_WITH_SQLITE=ON -DMM_SANITIZE=OFF
+cmake --build build/mm-sqlite --target micromeerschaum_sqlite -j4
+make -C "$mp/ports/unix" -j4 MICROPY_PY_FFI=0 MM_WITH_SQLITE=1 \
+    MM_SQLITE_BUILD="$PWD/build/mm-sqlite" BUILD="$PWD/build/mm-unix-sql" \
+    USER_C_MODULES="$PWD/ports/micropython"
+ports/micropython/tests/run.sh "$PWD/build/mm-unix-sql/micropython" --sqlite
+```
