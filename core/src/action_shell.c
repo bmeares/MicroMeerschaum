@@ -21,7 +21,7 @@ bool mm_action_shell_init(mm_action_shell *s, mm_action_view view, mm_action_mod
     if (!s) return false;
     memset(s, 0, sizeof *s);
     if (!view.registry || !reply || !cap || !emit ||
-        (mode != MM_ACTION_QUOTED && mode != MM_ACTION_LITERAL)) return false;
+        (mode != MM_ACTION_QUOTED && mode != MM_ACTION_LITERAL && mode != MM_ACTION_LITERAL_PREFIX)) return false;
     s->view = view;
     s->mode = mode;
     s->echo = echo;

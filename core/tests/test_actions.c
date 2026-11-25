@@ -148,6 +148,15 @@ static void bounds(void)
     before = calls;
     CHECK(!mm_actions_dispatch(&local, line, 3u + 2u*MM_ACTION_MAX_ARGS, MM_ACTION_LITERAL, &work, &out));
     CHECK(calls == before);
+    const char *words[MM_ACTION_MAX_ARGS];
+    for (size_t i = 0; i < MM_ACTION_MAX_ARGS; i++) words[i] = "x";
+    line[3u + 2u*MM_ACTION_MAX_ARGS] = '\0';
+    expected_line = line;
+    expected_tail = line + 2;
+    expected_args = words;
+    expected_argc = MM_ACTION_MAX_ARGS;
+    CHECK(dispatch(&local, line, MM_ACTION_LITERAL_PREFIX));
+    expected_line = NULL;
     char tiny[3];
     mm_action_output_init(&out, tiny, sizeof tiny);
     CHECK(dispatch(&local, "ping", MM_ACTION_QUOTED));
