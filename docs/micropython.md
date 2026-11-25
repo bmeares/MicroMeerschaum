@@ -56,6 +56,59 @@ print(pipe.progress())
 print(pipe.read_doc(1))
 ```
 
+## Send the first reading to a hosted Pipe
+
+Install the hosted receiver, give the device a scoped API key, and generate the receiver configuration from the **same** `device_identity.py` used for `open_readings()`. The generator maps the onboard sensor's integer Celsius reading, with its integer millisecond tick as the example's row key. Start the API with TLS and use the same receiver settings for replay. [Install and configure the receiver](../receiver/plugin/README.md#install)
+
+At the board's serial REPL, use the open `pipe` from the first-reading steps. Save its observed row to compare with the hosted result. Connect to the local wireless network and set UTC for certificate verification.
+
+```python
+import network, ntptime, time
+expected = pipe.read_doc(1)
+print(expected)
+wifi = network.WLAN()
+wifi.active(True)
+wifi.connect(input("Wi-Fi SSID: "), input("Wi-Fi password: "))
+for _ in range(100):
+    if wifi.isconnected():
+        break
+    time.sleep_ms(200)
+assert wifi.isconnected(), "Wi-Fi connection timed out"
+ntptime.settime()
+```
+
+Enter the receiver's full HTTPS URL ending in `/micromeerschaum/v1/batch` and the scoped device API key. The firmware provides the ESP certificate bundle. For a private CA, copy its public PEM certificate to the board and set `ca_pem` to the file's contents.
+
+```python
+import mm_https
+from device_identity import DESTINATION
+from micromeerschaum import provision_peer
+
+url = input("Receiver HTTPS URL: ")
+token = input("Device API key: ")
+ca_pem = None
+client = mm_https.open(url, token, ca_pem)
+try:
+    provision_peer("api:site", DESTINATION, client.exchange)
+    ok, message = pipe.copy_to("api:site")
+    print(message)
+    pipe.reclaim()
+    assert ok, message
+finally:
+    client.close()
+```
+
+On the receiver host, run `mrsm mm receiver replay` and `mrsm mm receiver status` in the configured environment. For the first observation, verify that the durable and applied prefixes are both 1. Query the ordinary Pipe with the observed tick and confirm its Celsius value against the board's printed row.
+
+```python
+import meerschaum as mrsm
+observed_tick = int(input("Board tick: "))
+observed_celsius = int(input("Board Celsius: "))
+hosted = mrsm.Pipe("weather", "chip_temperature", instance="sql:local")
+assert hosted.get_docs(params={"tick": observed_tick}, limit=1) == [
+    {"tick": observed_tick, "celsius": observed_celsius}]
+```
+
 ## Supply data from an application
 
 On a mounted board, open a separate Pipe for a push driver. Run with `create=True` when first provisioning this volume. Omit the flag on subsequent boots.
@@ -108,7 +161,7 @@ remote = Pipe("sensor", "temperature", instance="peer:greenhouse")
 ok, message = remote.sync({"tick": 43, "celsius": 21.9})
 ```
 
-A direct peer Pipe stages the rows in its matching default keep-old journal and succeeds after the destination acknowledges them. If the peer is offline or a reply is lost, `remote.staged_input` reports the durable local input count and `remote.confirmed_input` reports the confirmed remote input count. Call `remote.deliver()` after reconnecting to retry those identities. `pipe.copy_to()` requires a compatible, provisioned destination. It preserves original records and tracks the receiver's receipt. A sleeping peer never prevents a local journal Pipe from accepting supplied observations within its storage budget.
+A direct peer or API Pipe stages each group in its matching default keep-old journal, sends pending records, and reclaims fully acknowledged segments for subsequent groups. A successful direct sync confirms all its input at the destination. If the peer is offline or a reply is lost, `remote.staged_input` reports the durable local input count and `remote.confirmed_input` reports the confirmed remote input count. Call `remote.deliver()` after reconnecting to retry those identities. `pipe.copy_to()` requires a compatible, provisioned destination. It preserves original records and tracks the receiver's receipt. A sleeping peer never prevents a local journal Pipe from accepting supplied observations within its storage budget.
 
 ## Query local rows with SQLite
 
@@ -134,10 +187,14 @@ Use the v0.1.0 source and an activated ESP-IDF **5.5.1** toolchain for MicroPyth
 ```sh
 board="$PWD/ports/micropython/boards/MM_ESP32_S3"
 git clone --branch v1.28.0 --depth 1 https://github.com/micropython/micropython.git ../micropython
+git -C ../micropython apply "$PWD/ports/micropython/patches/v1.28.0-nimble-passkey.patch"
+export MICROPY_GIT_TAG=v1.28.0+micromeerschaum.0.1.0
 make -C ../micropython/mpy-cross -j4
 make -C ../micropython/ports/esp32 BOARD_DIR="$board" submodules
 make -C ../micropython/ports/esp32 BOARD_DIR="$board"
 ```
+
+The patch forwards the NimBLE passkey event through the callback shared by the central and peripheral. Both devices can then complete authenticated first-time pairing. It applies to the pinned MicroPython checkout. [Board patch](../ports/micropython/patches/v1.28.0-nimble-passkey.patch)
 
 Flash `../micropython/ports/esp32/build-MM_ESP32_S3/firmware.bin` at offset zero using the installation command above. The native ESP-IDF storage examples use their own SDK version. [Native storage build](device-storage.md#run-the-storage-example)
 

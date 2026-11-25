@@ -51,3 +51,14 @@ assert origin.progress()["confirmed"] == 1 and relay.progress()["confirmed"] == 
 assert origin.get_docs() == [{"tick": 3}]
 relay.close()
 origin.close()
+
+wide = provision("sensor", "wide", sys.argv[1] + "/wide.db", 10, 1, 30,
+                 instance="sql:local", segment_bytes=65536, create=True, axis="tick",
+                 columns=(("tick", "int", True), ("left", "string", False),
+                          ("right", "string", False)))
+left = "a" * 33000
+right = "b" * 33000
+assert wide.sync({"tick": 1, "left": left})[0]
+assert wide.sync({"tick": 1, "right": right})[0]
+assert wide.get_docs(limit=1) == [{"tick": 1, "left": left, "right": right}]
+wide.close()

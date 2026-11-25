@@ -22,31 +22,19 @@ install -m 755 receiver/plugin/target/release/libmm_receiver.so "$MRSM_PLUGINS_D
 install -m 644 receiver/plugin/plugin.toml "$MRSM_PLUGINS_DIR/mm_receiver/"
 ```
 
-Use the same plugin directory and settings for the API and the worker. Save settings such as the following under `plugins.mm_receiver` in the Meerschaum configuration. The JSON shown is a complete `MRSM_CONFIG` overlay. Set the raw database path to an absolute path writable by the operator processes. Use a separate SQLite file for the ordinary Pipe. PostgreSQL accepts a connection URL such as `postgresql://user@host/database?sslmode=verify-full` in `raw_store`; provision that role with rights on the raw tables.
+Use the same plugin directory and settings for the API and worker. For the onboard ESP32-S3 reading, keep the `device_identity.py` generated during board provisioning on the operator's computer. Grant the device owner the custom scope `mm:ingest` and issue a token with that scope. The API credential goes on the device. Use its public token ID in the receiver grant. [First reading](../../docs/micropython.md#collect-your-first-reading)
 
-```json
-{
-  "plugins": {
-    "mm_receiver": {
-      "destination": "22",
-      "raw_store": "sqlite:///var/lib/micromeerschaum/raw.db?mode=rwc",
-      "grants": [
-        {"token_id": "REPLACE_WITH_TOKEN_ID", "origin": "11", "key": "sensor\u001ftemperature\u001f"}
-      ],
-      "outputs": [
-        {
-          "origin": "11", "generation": "1", "key": "sensor\u001ftemperature\u001f",
-          "instance": "sql:local", "connector": "weather", "metric": "temperature",
-          "columns": {"datetime": "tick"},
-          "dtypes": {"tick": "int", "celsius": "float"}
-        }
-      ]
-    }
-  }
-}
+From the unpacked source on the operator's computer, generate the configuration for this board. Set `TOKEN_ID` to the token's public ID. Set `RAW_STORE` to an absolute SQLite file writable by the receiver or a PostgreSQL URL such as `postgresql://user@host/database?sslmode=verify-full`. Provision the database role with rights on the raw tables. Use a separate local SQLite file for the ordinary Pipe.
+
+```sh
+RAW_STORE='sqlite:///var/lib/micromeerschaum/raw.db?mode=rwc'
+python3 examples/micropython/receiver_config.py "$TOKEN_ID" "$RAW_STORE" \
+    --identity device_identity.py --instance sql:local > receiver-config.json
 ```
 
-Grant the device owner the custom scope `mm:ingest` and issue its token with that scope. Copy the token's public ID into a grant for every exact origin and Pipe key it may send. Give a relay its own token and grants for the origins it forwards. Quote 64-bit identifiers in configuration to preserve their precision. Initialize storage, then start or restart the API with the deployment's TLS certificate and key.
+The generated `plugins.mm_receiver` settings use this board's exact origin, generation and destination, quoted to preserve 64-bit precision. They grant the `plugin:chip_sensor` / `temperature` stream and map integer `tick` and `celsius` fields into the ordinary `weather` / `chip_temperature` Pipe. Give a relay its own token and grants for the origins it forwards. For additional devices, extend the grants and outputs and assign each stream its own output Pipe. [Configuration generator](../../examples/micropython/receiver_config.py)
+
+Copy `receiver-config.json` to the receiver host. Initialize storage, then start or restart the API with the deployment's TLS certificate and key.
 
 ```sh
 export MRSM_CONFIG="$(cat receiver-config.json)"
@@ -75,7 +63,7 @@ The worker applies one original sequence at a time through the durable prefix. A
 ```python
 import meerschaum as mrsm
 
-pipe = mrsm.Pipe("weather", "temperature", instance="sql:local")
+pipe = mrsm.Pipe("weather", "chip_temperature", instance="sql:local")
 print(pipe.get_docs(limit=10))
 ```
 
@@ -87,5 +75,7 @@ With Python, `mrsm` 5.1.5 and OpenSSL available, run these from the repository r
 python receiver/plugin/tests/deployment.py --library receiver/plugin/target/release/libmm_receiver.so
 python receiver/plugin/tests/deployment.py --library receiver/plugin/target/release/libmm_receiver.so --postgres
 ```
+
+Add `--micropython /path/to/mm-unix/micropython` to exercise the first-reading application and generated configuration with the Unix MicroPython binding, a simulated integer temperature sensor, a live TLS upload and a read from the ordinary Pipe.
 
 The test restarts the API after a lost reply, races two authorized routes, compares the retained bytes, submits a conflicting batch, and replays a correction that arrived before its original. It induces a database checkpoint failure after an ordinary row commits, locks and unlocks the destination Pipe, restores an evicted record, and verifies that a parser error leaves the raw receipt intact.

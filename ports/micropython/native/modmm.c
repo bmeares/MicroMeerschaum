@@ -2,7 +2,7 @@
 #include <string.h>
 #include "py/runtime.h"
 #include "integers.h"
-#include "micromeerschaum/document.h"
+#include "row.h"
 #include "micromeerschaum/peer.h"
 
 static void check(mm_journal_status status) {
@@ -110,6 +110,15 @@ static mp_obj_t from_scalar(mm_value v) {
     mp_raise_ValueError(MP_ERROR_TEXT("invalid field type"));
 }
 
+mp_obj_t mm_python_dict(mm_row row) {
+    mp_obj_t result = mp_obj_new_dict(row.count);
+    for (size_t i = 0; i < row.count; ++i) {
+        mp_obj_dict_store(result, mp_obj_new_str(row.fields[i].name.data, row.fields[i].name.len),
+            from_scalar(row.fields[i].value));
+    }
+    return result;
+}
+
 static mp_obj_t mm_decode(mp_obj_t payload) {
     mp_buffer_info_t buf;
     mp_get_buffer_raise(payload, &buf, MP_BUFFER_READ);
@@ -118,11 +127,7 @@ static mp_obj_t mm_decode(mp_obj_t payload) {
     if (mm_document_decode(buf.buf, buf.len, fields, MM_DOCUMENT_MAX_FIELDS, &n) != MM_OK) {
         mp_raise_ValueError(MP_ERROR_TEXT("invalid document"));
     }
-    mp_obj_t result = mp_obj_new_dict(n);
-    for (size_t i = 0; i < n; ++i) {
-        mp_obj_dict_store(result, mp_obj_new_str(fields[i].name.data, fields[i].name.len),
-            from_scalar(fields[i].value));
-    }
+    mp_obj_t result = mm_python_dict((mm_row){fields, n});
     m_del(mm_field, fields, MM_DOCUMENT_MAX_FIELDS);
     return result;
 }

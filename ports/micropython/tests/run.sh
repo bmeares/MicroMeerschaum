@@ -6,8 +6,10 @@ tests=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$tests/../../.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
-export MICROPYPATH="$repo/ports/micropython:$tests"
+export MICROPYPATH="$repo/ports/micropython:$tests:$repo/examples/micropython:.frozen"
 "$mp" "$tests/pipe.py" "$work"
+"$mp" "$tests/ble_delivery.py" "$work"
+"$mp" "$tests/ble_enroll.py"
 if [[ "${2:-}" == --sqlite ]]; then
     "$mp" "$tests/sqlite_pipe.py" "$work"
 fi

@@ -156,7 +156,66 @@ def doc(value):
     )
 
 
-def qualify(root, library, db):
+def qualify_chip_sensor(root, mp, config, raw_db, token):
+    repo = PLUGIN.parents[1]
+    examples = repo / "examples" / "micropython"
+    # Supply the S3's integer die-temperature reading and substitute a Unix volume path.
+    (root / "esp32.py").write_text("def mcu_temperature(): return 37\n")
+    (root / "_mmstorage.py").write_text("def mount(first_boot): pass\n")
+    (root / "device_identity.py").write_text(
+        f"ORIGIN = 11\nGENERATION = {secrets.randbits(63) + 1}\nDESTINATION = 22\n"
+    )
+    paths = [root, examples, repo / "ports" / "micropython", ".frozen"]
+    mp_env = dict(os.environ, MICROPYPATH=os.pathsep.join(map(str, paths)))
+    # Use the same sensor, source registration and persisted stream on both opens.
+    def on_device(script):
+        setup = """
+import json, readings
+from micromeerschaum import provision
+def unix_provision(connector, metric, path, *args, **kw):
+    return provision(connector, metric, "TEMP.MM", *args, **kw)
+readings.provision = unix_provision
+"""
+        return checked_command(str(mp), "-c", setup + script, cwd=root, env=mp_env)
+
+    reading = json.loads(on_device("""
+pipe = readings.open_readings(True)
+ok, message = pipe.sync()
+assert ok, message
+print(json.dumps(pipe.read_doc(1)))
+with open("first.batch", "wb") as batch:
+    batch.write(pipe.batch())
+pipe.close()
+"""))
+    assert reading["celsius"] == 37
+    overlay = json.loads(checked_command(
+        sys.executable, str(examples / "receiver_config.py"), str(token.id),
+        raw_db, "--instance", "sql:mmtest", cwd=root,
+    ))
+    env = dict(os.environ, MRSM_CONFIG=json.dumps({**config, **overlay}))
+    with serve(root, env) as post:
+        code, reply = post(
+            "/micromeerschaum/v1/batch", (root / "first.batch").read_bytes(), token.get_api_key()
+        )
+        assert code == 200, (code, reply)
+    (root / "first.receipt").write_bytes(reply)
+    on_device("""
+from device_identity import DESTINATION
+pipe = readings.open_readings()
+with open("first.receipt", "rb") as receipt:
+    pipe.confirm(DESTINATION, receipt.read())
+assert pipe.progress()["confirmed"] == 1
+pipe.close()
+""")
+    checked_command("mrsm", "mm", "receiver", "replay", cwd=root, env=env)
+    import meerschaum as mrsm
+
+    rows = mrsm.Pipe("weather", "chip_temperature", instance="sql:mmtest").get_docs(limit=1)
+    assert rows == [reading], rows
+    print("First chip_sensor observation matched the hosted Pipe after TLS upload and replay.")
+
+
+def qualify(root, library, db, micropython=None):
     for k in list(os.environ):
         if k.startswith("MRSM_"):
             del os.environ[k]
@@ -382,6 +441,9 @@ def qualify(root, library, db):
         if not db:
             raw.close()
 
+    if micropython:
+        qualify_chip_sensor(root, micropython, config, raw_db, tokens[0])
+
     print(
         "Passed authenticated HTTPS capture, restart, retries, conflicts, legacy ingress and ordered locked-Pipe replay."
     )
@@ -395,9 +457,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Start a disposable PostgreSQL 18 Docker container.",
     )
+    parser.add_argument(
+        "--micropython", type=Path, help="Exercise the chip_sensor example with this Unix build."
+    )
     args = parser.parse_args()
     with (
         tempfile.TemporaryDirectory() as directory,
         postgres() if args.postgres else contextlib.nullcontext(None) as db,
     ):
-        qualify(Path(directory), args.library.resolve(), db)
+        mp = args.micropython.resolve() if args.micropython else None
+        qualify(Path(directory), args.library.resolve(), db, mp)

@@ -24,10 +24,11 @@ def _wire_key(connector, metric, location):
 
 
 class _Registration:
-    def __init__(self, store, path, budget, delivery_issuer, boot, retention, custody):
+    def __init__(self, store, path, budget, delivery_issuer, boot, retention, custody, segments):
         self.store = store
         self.path = path
         self.budget = budget
+        self.segments = segments
         self.delivery_issuer = delivery_issuer
         self.custody = custody
         self.boot = boot
@@ -76,7 +77,7 @@ def provision(connector, metric, path, origin, generation, destination, location
         raise ValueError("unknown storage instance")
     issuer = custodian if custodian is not None and not receiver else destination
     _stores[pipe._id()] = _Registration(store, path, budget, issuer, boot, retention,
-                                        custodian is not None and not receiver)
+                                        custodian is not None and not receiver, segments)
     return pipe
 
 
@@ -110,6 +111,30 @@ def _rows(frame):
             raise ValueError("expected an iterable of row dictionaries")
         for row in frame:
             yield row
+
+
+def _groups(frame, budget):
+    group = []
+    group_bytes = 0
+    for row in _rows(frame):
+        if not isinstance(row, dict) or len(row) > 64:
+            raise ValueError("expected a document with at most 64 fields")
+        payload = _mm.encode(list(row.items()))
+        size = 32 + len(payload)
+        if group and group_bytes + size > budget:
+            yield group
+            group = []
+            group_bytes = 0
+        if size > budget:
+            raise ValueError("document exceeds segment size")
+        group.append(payload)
+        group_bytes += size
+        if len(group) == 8:
+            yield group
+            group = []
+            group_bytes = 0
+    if group:
+        yield group
 
 
 class Pipe:
@@ -167,7 +192,6 @@ class Pipe:
     def sync(self, df=_missing, **kw):
         self.staged_input = self.confirmed_input = self.uncertain_first = self.uncertain_count = 0
         remote = _remote(self.instance_keys)
-        start = None
         try:
             config = self._config()
             if remote:
@@ -176,7 +200,6 @@ class Pipe:
                     raise ValueError("direct sync requires a final destination")
                 if config.retention != "keep-old":
                     raise ValueError("peer staging requires keep-old retention")
-                start = self.progress()["high"]
             if df is _missing:
                 module = self._source()
                 if not self._registered:
@@ -184,43 +207,49 @@ class Pipe:
                 df = module.fetch(self, **kw)
             elif kw:
                 raise ValueError("source arguments require a source fetch")
-            group = []
-            group_bytes = 0
-            budget = config.budget
-            for row in _rows(df):
-                if not isinstance(row, dict) or len(row) > 64:
-                    raise ValueError("expected a document with at most 64 fields")
-                payload = _mm.encode(list(row.items()))
-                size = 32 + len(payload)
-                if group and group_bytes + size > budget:
-                    self._commit(config, group)
-                    group = []
-                    group_bytes = 0
-                if size > budget:
-                    raise ValueError("document exceeds segment size")
-                group.append(payload)
-                group_bytes += size
-                if len(group) == 8:
-                    self._commit(config, group)
-                    group = []
-                    group_bytes = 0
-            if group:
-                self._commit(config, group)
+            groups = _groups(df, config.budget)
             if remote:
-                self._deliver(self.instance_keys)
+                self._sync_remote(config, groups)
+            else:
+                for group in groups:
+                    self._commit(config, group)
             self.confirmed_input = self.staged_input
         except Exception as error:
             if remote:
-                if start is not None:
-                    try:
-                        self.confirmed_input = max(0, min(self.staged_input, self.progress()["confirmed"] - start))
-                    except (OSError, ValueError):
-                        pass
                 return False, "%s (staged %d, confirmed at peer %d)" % (
                     error, self.staged_input, self.confirmed_input)
             self.confirmed_input = self.staged_input
             return False, "%s (confirmed %d input rows)" % (error, self.confirmed_input)
         return True, "committed %d input rows" % self.confirmed_input
+
+    def _sync_remote(self, config, groups):
+        delivery_error = None
+        self.reclaim()  # Recover space after a reset between confirmation and reclamation.
+        state = self.progress()
+        # Each occupied segment retains at least one pending sequence.
+        # When the journal could be full, drain before recording a miss.
+        if state["high"] - state["confirmed"] >= config.segments:
+            try:
+                self._deliver(self.instance_keys)
+            except Exception as error:
+                delivery_error = error
+        for group in groups:
+            before = self.progress()["high"] if delivery_error is None else None
+            self._commit(config, group)
+            if before is not None:
+                try:
+                    self._deliver(self.instance_keys)
+                    self.confirmed_input += len(group)
+                except Exception as error:
+                    # Keep staging while offline. A lost reply can confirm
+                    # only part of this group, even if the peer stored more.
+                    delivery_error = error
+                    confirmed = self.progress()["confirmed"]
+                    self.confirmed_input += max(0, min(len(group), confirmed - before))
+        if delivery_error is not None:
+            raise delivery_error
+        if not self.staged_input:
+            self._deliver(self.instance_keys)
 
     def _commit(self, config, group):
         status, count, first, uncertain = config.store.append(group, time.ticks_us(), config.boot)
@@ -259,22 +288,30 @@ class Pipe:
         if self.instance_keys != "sql:local":
             self._config().store.reclaim()
 
+    def check_delivery_issuer(self, issuer):
+        """Check an authenticated node before handing it this Pipe's records."""
+        if issuer != self._config().delivery_issuer:
+            raise ValueError("peer differs from provisioned delivery issuer")
+
     def _peer(self, name):
         peer = _peers.get(name)
         if peer is None:
             raise ValueError("peer has not been provisioned")
-        if peer[0] != self._config().delivery_issuer:
-            raise ValueError("peer identity differs from provisioned destination")
+        self.check_delivery_issuer(peer[0])
         return peer
 
     def _deliver(self, name):
         issuer, exchange, cap, max_records = self._peer(name)
+        staging = _remote(self.instance_keys)
         state = self.progress()
         through = state["confirmed"]
         while through < state["high"]:
             receipt = exchange(self.batch(after=through, cap=cap, max_records=max_records))
             self.confirm(issuer, receipt)
-            next_through = self.progress()["confirmed"]
+            if staging:
+                self.reclaim()
+            state = self.progress()  # Reclamation can append a pending loss declaration.
+            next_through = state["confirmed"]
             if next_through <= through:
                 raise OSError("peer receipt did not advance")
             through = next_through
@@ -294,8 +331,7 @@ class Pipe:
 
     def get_docs(self, begin=None, end=None, params=None, limit=100):
         """Return up to limit current SQLite rows in the half-open axis interval."""
-        encoded = self._config().store.docs(begin, end, params, limit)
-        return [_mm.decode(payload) for payload in encoded]
+        return self._config().store.docs(begin, end, params, limit)
 
     def get_sync_time(self, params=None):
         """Latest matching SQLite axis value, as integer ticks or Unix microseconds."""

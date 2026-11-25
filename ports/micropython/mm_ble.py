@@ -110,6 +110,7 @@ async def deliver(pipe, connection, authorize, max_records=8, cap=4096, timeout_
     """
     import bluetooth
     issuer = _identity(connection, authorize)
+    pipe.check_delivery_issuer(issuer)
     service = await connection.service(bluetooth.UUID(SERVICE), timeout_ms=timeout_ms)
     if service is None:
         raise OSError("peer service unavailable")

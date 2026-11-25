@@ -112,6 +112,14 @@ static void damaged_checkpoint(const char *path)
 {
     group_survives_remount(path);
     const mm_volume_options opt = {4, 512, MM_KEEP_OLD};
+    /* Only the first 2048 bytes of a v1 commit page are significant. */
+    int padding_fd = open(path, O_RDWR);
+    CHECK(padding_fd >= 0 && pwrite(padding_fd, "P", 1, 3000) == 1 &&
+          fsync(padding_fd) == 0 && close(padding_fd) == 0);
+    mm_journal *reopened;
+    CHECK(mm_journal_open_volume(&reopened, path, &origin, &opt, false) == MM_JOURNAL_OK);
+    CHECK(mm_journal_high(reopened) == 2);
+    mm_journal_close(reopened);
     /* Damage opposite commit pages in succession. Opening and validating
      * the survivor repairs its partner before another successful append. */
     for (off_t at = 0; at <= 4096; at += 4096) {
