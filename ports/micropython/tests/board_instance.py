@@ -158,6 +158,7 @@ def main():
                     env = dict(
                         os.environ,
                         MRSM_PLUGINS_DIR=str(plugins),
+                        XDG_STATE_HOME=str(root / "state"),
                         MRSM_ROOT_DIR=str(root / "mrsm"),
                         MRSM_CONFIG=json.dumps(
                             {
