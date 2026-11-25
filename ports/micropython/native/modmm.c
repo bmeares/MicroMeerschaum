@@ -135,8 +135,15 @@ typedef struct {
 
 static const mp_obj_type_t volume_type;
 
+static volume_obj *volume(mp_obj_t value) {
+    if (!mp_obj_is_type(value, &volume_type)) {
+        mp_raise_TypeError(MP_ERROR_TEXT("expected a journal volume"));
+    }
+    return MP_OBJ_TO_PTR(value);
+}
+
 static mm_journal *store(mp_obj_t value) {
-    volume_obj *self = MP_OBJ_TO_PTR(value);
+    volume_obj *self = volume(value);
     if (!self->journal) {
         mp_raise_ValueError(MP_ERROR_TEXT("volume closed"));
     }
@@ -152,8 +159,8 @@ static mp_obj_t open_volume(size_t n, const mp_obj_t *a) {
     mm_journal_config config = {
         .stream = {integer_bits(a[2], false), integer_bits(a[3], false), key.data, key.len},
         .mode = mp_obj_is_true(a[5]) ? MM_JOURNAL_RECEIVER : MM_JOURNAL_ORIGIN,
-        .role = MM_DESTINATION,
-        .issuer = integer_bits(a[4], false),
+        .role = a[10] == mp_const_none ? MM_DESTINATION : MM_CUSTODY,
+        .issuer = integer_bits(a[10] == mp_const_none ? a[4] : a[10], false),
         .destination = integer_bits(a[4], false),
     };
     mm_volume_options options = {
@@ -165,10 +172,10 @@ static mp_obj_t open_volume(size_t n, const mp_obj_t *a) {
     check(mm_journal_open_volume(&self->journal, path.data, &config, &options, mp_obj_is_true(a[9])));
     return MP_OBJ_FROM_PTR(self);
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(open_volume_obj, 10, 10, open_volume);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(open_volume_obj, 11, 11, open_volume);
 
 static mp_obj_t close_volume(mp_obj_t value) {
-    volume_obj *self = MP_OBJ_TO_PTR(value);
+    volume_obj *self = volume(value);
     mm_journal_close(self->journal);
     self->journal = NULL;
     return mp_const_none;
