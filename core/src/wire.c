@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "micromeerschaum/mm.h"
+#include "utf8.h"
 
 const char *mm_status_name(mm_status status)
 {
@@ -22,7 +23,7 @@ const char *mm_status_name(mm_status status)
 }
 
 /* Strict UTF-8 (RFC 3629): no overlongs, surrogates or code points past U+10FFFF. */
-static int utf8_valid(const uint8_t *s, size_t n)
+int mm_utf8_valid(const uint8_t *s, size_t n)
 {
     size_t i = 0;
     while (i < n) {
@@ -58,7 +59,7 @@ mm_status mm_key_check(const char *key, size_t len)
 {
     const uint8_t *s = (const uint8_t *)key;
     size_t seps = 0, at[2] = {0, 0};
-    if (len < 1 || len > MM_KEY_MAX || !utf8_valid(s, len)) return MM_BAD_KEY;
+    if (len < 1 || len > MM_KEY_MAX || !mm_utf8_valid(s, len)) return MM_BAD_KEY;
     for (size_t i = 0; i < len; i++) {
         if (s[i] != 0x1F) continue;
         if (seps == 2) return MM_BAD_KEY;
