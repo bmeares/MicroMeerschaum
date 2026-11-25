@@ -70,7 +70,7 @@ Changing the firmware language should preserve a stream when the replacement fir
 
 | Environment | Available in this checkout | Evidence needed for supported device sync |
 | --- | --- | --- |
-| ESP-IDF C/C++ | C codec component and a buildable C++ application for ESP32-S3. [Example](../examples/esp-idf/codec/main/main.cpp) | Build a native application using the public Pipe API. Commit and reopen a batch on the chosen medium. Exchange it with a MicroPython peer over BLE GATT in both role assignments, including a lost reply and reboot. |
+| ESP-IDF C/C++ | C/C++ Pipe API and bounded volume journal. Both SDMMC/FAT and on-board LittleFS examples cross-build for ESP32-S3. Two QEMU boots recovered successive groups on LittleFS. [Storage example and evidence](device-storage.md) | Build a native application using the public Pipe API. Commit and reopen a batch on the chosen medium. Exchange it with a MicroPython peer over BLE GATT in both role assignments, including a lost reply and reboot. |
 | MicroPython | Release design for a native module and Python source plugins. | Build the module into a named board image. Install a sensor module, sync its first row, then run the same recovery and peer tests through the Python API. |
 | Arduino-ESP32 on ESP32-S3 | A standalone sketch using a temporary library passed the emulator codec test below. | Ship the native sources as an installable library. Build an example `.ino` with Arduino CLI and pass the local durability and peer retry tests on the board and medium qualified for ESP-IDF. |
 
