@@ -259,12 +259,16 @@ class Pipe:
         if self.instance_keys != "sql:local":
             self._config().store.reclaim()
 
+    def check_delivery_issuer(self, issuer):
+        """Check an authenticated node before handing it this Pipe's records."""
+        if issuer != self._config().delivery_issuer:
+            raise ValueError("peer differs from provisioned delivery issuer")
+
     def _peer(self, name):
         peer = _peers.get(name)
         if peer is None:
             raise ValueError("peer has not been provisioned")
-        if peer[0] != self._config().delivery_issuer:
-            raise ValueError("peer identity differs from provisioned destination")
+        self.check_delivery_issuer(peer[0])
         return peer
 
     def _deliver(self, name):
