@@ -169,15 +169,8 @@ impl Receiver {
 struct ReceiverPlugin;
 const SCOPE: &str = "mm:ingest";
 fn configured() -> Result<Receiver> {
-    let mut config = host::plugin_config()?;
-    if config.is_null() {
-        config = host::config(&["plugins", "mm_receiver"])?;
-    }
-    Receiver::from_config(config).map_err(|_| {
-        Error::Message(
-            "Configure plugins.micro (or the legacy plugins.mm_receiver settings).".into(),
-        )
-    })
+    Receiver::from_config(host::plugin_config()?)
+        .map_err(|_| Error::Message("Configure the receiver in plugins.micro.".into()))
 }
 impl Plugin for ReceiverPlugin {
     fn manifest(&self) -> Value {
@@ -192,14 +185,17 @@ impl Plugin for ReceiverPlugin {
                 RouteSpec::new("legacy", "POST", "/micromeerschaum/v0/batch").scopes([SCOPE]),
             )
             .action(
-                "mm_receiver_status",
+                "micro_receiver_status",
                 "Show raw delivery prefixes, route counts and applied checkpoints.",
             )
             .action(
-                "mm_receiver_replay",
+                "micro_receiver_replay",
                 "Publish the durable prefix to configured ordinary Pipes.",
             )
-            .action("mm_receiver_init", "Initialize the configured raw store.")
+            .action(
+                "micro_receiver_init",
+                "Initialize the configured raw store.",
+            )
             .into()
     }
     fn api_route(&self, request: &RouteRequest) -> Result<RouteResponse> {
@@ -236,28 +232,20 @@ impl Plugin for ReceiverPlugin {
             ("action", Some("micro_shell")) => device::action(request, true),
             ("action", Some("micro_action")) => device::action(request, false),
             ("api_route", _) => meerschaum_plugin::sdk::call_server_extension(self, request),
-            ("action", Some("mm_receiver_status")) => {
+            ("action", Some("micro_receiver_status")) => {
                 let rows = store::run(store::status(&configured()?.raw_store))
                     .map_err(|e| Error::Message(format!("{e:?}")))?;
                 Ok(Reply::json(json!([true, json!(rows).to_string()])))
             }
-            ("action", Some("mm_receiver_replay")) => {
+            ("action", Some("micro_receiver_replay")) => {
                 let result = configured()?.replay();
                 Ok(Reply::json(match result {
                     Ok(()) => json!([true, "Replayed receiver outputs."]),
                     Err(error) => json!([false, format!("Replay stopped: {error:?}")]),
                 }))
             }
-            ("action", Some("mm_receiver_init")) => {
+            ("action", Some("micro_receiver_init")) => {
                 let receiver = configured()?;
-                // An API token can only read this plugin's section. Store a Meerschaum
-                // config reference so an upgraded deployment keeps following its old grants.
-                if host::plugin_config()?.is_null() {
-                    let installed = host::write_plugin_config(&json!("MRSM{plugins:mm_receiver}"))?;
-                    if !installed.success {
-                        return Err(Error::Message(installed.message));
-                    }
-                }
                 receiver
                     .initialize()
                     .map_err(|e| Error::Message(format!("{e:?}")))?;

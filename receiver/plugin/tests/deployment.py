@@ -207,7 +207,7 @@ with open("first.receipt", "rb") as receipt:
 assert pipe.progress()["confirmed"] == 1
 pipe.close()
 """)
-    checked_command("mrsm", "mm", "receiver", "replay", cwd=root, env=env)
+    checked_command("mrsm", "micro", "receiver", "replay", cwd=root, env=env)
     import meerschaum as mrsm
 
     rows = mrsm.Pipe("weather", "chip_temperature", instance="sql:mmtest").get_docs(limit=1)
@@ -215,7 +215,7 @@ pipe.close()
     print("First chip_sensor observation matched the hosted Pipe after TLS upload and replay.")
 
 
-def qualify(root, library, db, micropython=None):
+def qualify(root, library, db, micropython=None, previous_library=None):
     for k in list(os.environ):
         if k.startswith("MRSM_"):
             del os.environ[k]
@@ -292,9 +292,8 @@ def qualify(root, library, db, micropython=None):
         ],
     }
     settings["outputs"].append(dict(settings["outputs"][0], metric="second_output"))
-    config["plugins"] = {"mm_receiver": settings}
+    config["plugins"] = {"micro": settings}
     env = {**os.environ, "MRSM_CONFIG": json.dumps(config)}
-    checked_command("mrsm", "mm", "receiver", "init", env=env, cwd=root)
     checked_command(
         "openssl",
         "req",
@@ -319,11 +318,26 @@ def qualify(root, library, db, micropython=None):
     v1, v0 = "/micromeerschaum/v1/batch", "/micromeerschaum/v0/batch"
     original, correction = record(1, doc(11)), record(2, doc(44))
     expected = lambda n: receipt(1, DESTINATION, through=n)
+    if previous_library:
+        old_plugins = root / "previous-plugins"
+        old_package = old_plugins / "mm_receiver"
+        old_package.mkdir(parents=True)
+        shutil.copy2(previous_library, old_package / "libmm_receiver.so")
+        (old_package / "plugin.toml").write_text('name = "mm_receiver"\nversion = "0.1.0"\n')
+        old_settings = {**config, "plugins": {"mm_receiver": settings}}
+        old_env = dict(env, MRSM_PLUGINS_DIR=str(old_plugins), MRSM_CONFIG=json.dumps(old_settings))
+        checked_command("mrsm", "mm", "receiver", "init", cwd=root, env=old_env)
+        with serve(root, old_env) as old_post:
+            assert old_post(v1, batch([correction]), direct) == (200, expected(0))
+        shutil.rmtree(old_plugins)
+        # Only the new name is configured, and the old library is gone.
+        assert set(json.loads(env["MRSM_CONFIG"])["plugins"]) == {"micro"}
+    checked_command("mrsm", "micro", "receiver", "init", env=env, cwd=root)
     with serve(root, env) as post:
         assert post(v1, batch([original]))[0] == 401
         assert post(v1, batch([original]), unscoped)[0] == 403
         assert post(v1, batch([original]), unauthorized)[0] == 403
-        reply = post(v1, batch([correction]), direct)
+        reply = post(v1, batch([] if previous_library else [correction]), direct)
         assert reply == (200, expected(0)), reply
         assert post(v1, batch([original])[:-1], direct)[0] == 400
         assert post(v1, batch([original, record(2, b"conflict")]), direct)[0] == 409
@@ -350,7 +364,7 @@ def qualify(root, library, db, micropython=None):
             "pipe": KEY.decode(),
             "durable_through": 1,
         }
-        replay = ["mrsm", "mm", "receiver", "replay"]
+        replay = ["mrsm", "micro", "receiver", "replay"]
         # Inspect exact original bytes and route observations, then induce a storage failure
         # after the independent ordinary Pipe commits its first row.
         raw = conn if db else sqlite3.connect(root / "raw.db", isolation_level=None)
@@ -435,7 +449,7 @@ def qualify(root, library, db, micropython=None):
         assert post(v1, batch(), direct) == (200, expected(8))
         assert pipe.get_docs(limit=5) == [{"tick": 1, "value": 77}]
         status = checked_command(
-            "mrsm", "mm", "receiver", "status", env=env, cwd=root
+            "mrsm", "micro", "receiver", "status", env=env, cwd=root
         ).decode()
         assert '"durable_through":8' in status and '"applied":7' in status, status
         if not db:
@@ -460,10 +474,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--micropython", type=Path, help="Exercise the chip_sensor example with this Unix build."
     )
+    parser.add_argument("--previous-library", type=Path, help="Exercise an upgrade from the 0.1.0 receiver.")
     args = parser.parse_args()
     with (
         tempfile.TemporaryDirectory() as directory,
         postgres() if args.postgres else contextlib.nullcontext(None) as db,
     ):
         mp = args.micropython.resolve() if args.micropython else None
-        qualify(Path(directory), args.library.resolve(), db, mp)
+        qualify(Path(directory), args.library.resolve(), db, mp, args.previous_library)

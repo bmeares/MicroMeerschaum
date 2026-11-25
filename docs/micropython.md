@@ -98,7 +98,7 @@ finally:
     client.close()
 ```
 
-On the receiver host, run `mrsm mm receiver replay` and `mrsm mm receiver status` in the configured environment. For the first observation, verify that the durable and applied prefixes are both 1. Query the ordinary Pipe with the observed tick and confirm its Celsius value against the board's printed row.
+On the receiver host, run `mrsm micro receiver replay` and `mrsm micro receiver status` in the configured environment. For the first observation, verify that the durable and applied prefixes are both 1. Query the ordinary Pipe with the observed tick and confirm its Celsius value against the board's printed row.
 
 ```python
 import meerschaum as mrsm

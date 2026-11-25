@@ -20,18 +20,15 @@ mkdir -p "$MRSM_PLUGINS_DIR"
 tar -xzf micro-0.2.0-linux-x86_64.tar.gz -C "$MRSM_PLUGINS_DIR"
 ```
 
-**Upgrading from `mm_receiver` 0.1.0.** Stop the API and replay jobs. On each host, move the previous package outside every Meerschaum plugin search directory before installing `micro`. The two libraries declare the same receiver routes and actions. Keep the old settings, raw database and ordinary Pipe instance.
+**Upgrading from `mm_receiver` 0.1.0.** Stop the API and its replay jobs. Move the old package outside every Meerschaum plugin directory. In the configuration used by the API and worker, rename the `plugins.mm_receiver` section to `plugins.micro`. Keep its contents, including any environment-variable references, database connection, grants and output mappings. For an environment-managed configuration, make the same key rename in the deployment source.
 
 ```sh
-export MRSM_PLUGINS_DIR="${MRSM_PLUGINS_DIR:-$HOME/.config/meerschaum/plugins}"
-backup="$(mktemp -d)"
-mv "$MRSM_PLUGINS_DIR/mm_receiver" "$backup/"
 mrsm install plugins micro
-mrsm mm receiver init
-mrsm mm receiver status
+mrsm micro receiver init
+mrsm micro receiver status
 ```
 
-Run the two receiver commands with the API's deployment configuration. If `plugins.micro` is absent, initialization writes a reference from that section to `plugins.mm_receiver`. This lets the scoped API route follow the old settings. With read-only config files, set `"micro":"MRSM{plugins:mm_receiver}"` alongside the old section in `plugins` before initialization. Restart the API and resume replay. The receiver continues from the existing raw records and checkpoints. New deployments may put the receiver settings directly under `plugins.micro`.
+Restart the API and update any scheduled replay command to `mrsm micro receiver replay`. The previous plugin and configuration key can now be removed. The receiver opens the existing raw database and checkpoints. The device upload URLs and token scope stay the same.
 
 To build your own native library, unpack the release source on the host OS and architecture that runs the API. Build the plugin with Rust using its locked dependencies. The release toolchain is Rust 1.99.0. The following install commands assume Linux.
 
@@ -59,7 +56,7 @@ Copy `receiver-config.json` to the receiver host. Initialize storage, then start
 
 ```sh
 export MRSM_CONFIG="$(cat receiver-config.json)"
-mrsm mm receiver init
+mrsm micro receiver init
 mrsm start api --certfile "$TLS_CERT" --keyfile "$TLS_KEY"
 ```
 
@@ -73,13 +70,13 @@ To import a v0 batch, explicitly set `"legacy": true` on its grant and send to `
 
 ## Replay
 
-Run `mrsm mm receiver replay` once or schedule it through a Meerschaum job. Each output entry chooses the document parser and maps one exact v1 stream generation into a dedicated ordinary Pipe. Leave a binary stream without an output to retain it for a sensor-specific reader. A single source can have several separately keyed outputs. Set an optional `location` for each destination Pipe; omitting it selects the default location.
+Run `mrsm micro receiver replay` once or schedule it through a Meerschaum job. Each output entry chooses the document parser and maps one exact v1 stream generation into a dedicated ordinary Pipe. Leave a binary stream without an output to retain it for a sensor-specific reader. A single source can have several separately keyed outputs. Set an optional `location` for each destination Pipe; omitting it selects the default location.
 
 Declare the fields with `int`, `bool`, `float`, `string`, or `datetime`. Typed time fields carry signed Unix microseconds UTC. Each row must include all configured key columns with non-null values. The worker provisions a keyed upsert Pipe on its first write. A pre-existing Pipe must have matching keys and upsert enabled. Reserve each target for its mapped stream so independent origins and generations retain independent row identities. [Document encoding](../../spec/document-v1.md)
 
 The worker applies one original sequence at a time through the durable prefix. A failed or locked write leaves the checkpoint before that sequence. If the worker stops after publishing a row and before saving the checkpoint, it repeats the same keyed upsert on restart. A late original inside an earlier declared eviction rewinds the affected output checkpoints and reapplies subsequent corrections in source order.
 
-`mrsm mm receiver status` reports the raw prefix, retained record count, observed route-range count, and per-output applied checkpoints. An output acquires a checkpoint after its first successful step. Read materialized rows through the ordinary Pipe API.
+`mrsm micro receiver status` reports the raw prefix, retained record count, observed route-range count, and per-output applied checkpoints. An output acquires a checkpoint after its first successful step. Read materialized rows through the ordinary Pipe API.
 
 ```python
 import meerschaum as mrsm
