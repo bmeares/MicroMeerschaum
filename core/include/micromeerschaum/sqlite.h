@@ -67,6 +67,9 @@ mm_journal_status mm_sqlite_read(mm_sqlite *db, uint64_t seq, uint8_t *out, size
                                  size_t *used);
 /* Builds the next pending batch. NOT_FOUND means the outbox is caught up.
  * TOO_SMALL sets used to the required size for the first pending record. */
+/* Explicit window, with an empty batch permitted at high or when max_records is zero. */
+mm_journal_status mm_sqlite_batch_after(mm_sqlite *db, uint64_t after, uint32_t max_records,
+                                        uint8_t *out, size_t cap, size_t *used);
 mm_journal_status mm_sqlite_batch(mm_sqlite *db, uint8_t *out, size_t cap, size_t *used);
 /* Atomically persist the matching receipt and reclaim that outbox prefix.
  * Caller supplies the peer identity authenticated by the transport. */
