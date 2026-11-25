@@ -1,4 +1,5 @@
 """Exercise a real Meerschaum instance connector against an ESP32-S3 on persistent flash."""
+
 import argparse
 import contextlib
 import json
@@ -38,13 +39,15 @@ def provision_board(uart):
     until(uart, b">>> ")
     uart.sendall(b"\x01")
     until(uart, b"raw REPL; CTRL-B to exit\r\n>")
-    code = ("import _mmstorage\nfrom micromeerschaum import provision\n"
-            "_mmstorage.mount(True)\n"
-            "provision('sensor','readings','/mm/bench.mm',11,1,22,create=True).close()\n"
-            "with open('main.py','w') as f:\n    f.write(%r)\n"
-            "import os\nos.sync()\nprint('PROVISIONED')\n" % APP).encode()
+    code = (
+        "import _mmstorage\nfrom micromeerschaum import provision\n"
+        "_mmstorage.mount(True)\n"
+        "provision('sensor','readings','/mm/bench.mm',11,1,22,create=True).close()\n"
+        "with open('main.py','w') as f:\n    f.write(%r)\n"
+        "import os\nos.sync()\nprint('PROVISIONED')\n" % APP
+    ).encode()
     for i in range(0, len(code), 16):
-        uart.sendall(code[i:i+16])
+        uart.sendall(code[i : i + 16])
         time.sleep(0.05)
     uart.sendall(b"\x04")
     result = until(uart, b"\x04>")
@@ -58,6 +61,7 @@ def serial_port(uart):
     master, slave = pty.openpty()
     tty.setraw(slave)
     end = threading.Event()
+
     def pump():
         while not end.is_set():
             readable, _, _ = select.select([uart, master], [], [], 0.1)
@@ -70,8 +74,9 @@ def serial_port(uart):
                 # The emulator's UART FIFO, like a literal serial port, has limited depth.
                 data = os.read(master, 4096)
                 for i in range(0, len(data), 16):
-                    uart.sendall(data[i:i+16])
+                    uart.sendall(data[i : i + 16])
                     time.sleep(0.003)
+
     worker = threading.Thread(target=pump)
     worker.start()
     try:
@@ -110,8 +115,12 @@ def main():
     parser.add_argument("image", type=Path)
     parser.add_argument("--elf", type=Path, required=True)
     parser.add_argument("--emulator", default="esp-emu")
-    parser.add_argument("--library", type=Path, required=True, help="built micro plugin")
-    parser.add_argument("--transport-python", default=sys.executable, help="Python with pyserial")
+    parser.add_argument(
+        "--library", type=Path, required=True, help="built micro plugin"
+    )
+    parser.add_argument(
+        "--transport-python", default=sys.executable, help="Python with pyserial"
+    )
     args = parser.parse_args()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -131,16 +140,50 @@ def main():
             with emulator(args.emulator, flash, args.elf) as uart:
                 until(uart, b"INSTANCE READY\r\n")
                 with serial_port(uart) as port:
-                    connectors = {"micro":{"bench":{"transport":"usb","port":port,
-                                  "python":str(args.transport_python),"timeout":10}},
-                                  "sql":{"local":{"flavor":"sqlite","database":str(root/"local.db")}}}
-                    env = dict(os.environ, MRSM_PLUGINS_DIR=str(plugins), MRSM_ROOT_DIR=str(root/"mrsm"),
-                               MRSM_CONFIG=json.dumps({"meerschaum":{"connectors":connectors,"instance":"sql:local"}}))
-                    output = subprocess.check_output(["mrsm","show","pipes","-i","micro:bench"],
-                                                     env=env, cwd=root, text=True, timeout=60)
+                    connectors = {
+                        "micro": {
+                            "bench": {
+                                "transport": "usb",
+                                "port": port,
+                                "python": str(args.transport_python),
+                                "timeout": 10,
+                            }
+                        },
+                        "sql": {
+                            "local": {
+                                "flavor": "sqlite",
+                                "database": str(root / "local.db"),
+                            }
+                        },
+                    }
+                    env = dict(
+                        os.environ,
+                        MRSM_PLUGINS_DIR=str(plugins),
+                        MRSM_ROOT_DIR=str(root / "mrsm"),
+                        MRSM_CONFIG=json.dumps(
+                            {
+                                "meerschaum": {
+                                    "connectors": connectors,
+                                    "instance": "sql:local",
+                                }
+                            }
+                        ),
+                    )
+                    output = subprocess.check_output(
+                        ["mrsm", "show", "pipes", "-i", "micro:bench"],
+                        env=env,
+                        cwd=root,
+                        text=True,
+                        timeout=60,
+                    )
                     assert "readings" in output, output
-                    subprocess.run([sys.executable,"-c",WORKLOAD,str(boot)],env=env,cwd=root,
-                                   check=True,timeout=120)
+                    subprocess.run(
+                        [sys.executable, "-c", WORKLOAD, str(boot)],
+                        env=env,
+                        cwd=root,
+                        check=True,
+                        timeout=120,
+                    )
 
 
 if __name__ == "__main__":
