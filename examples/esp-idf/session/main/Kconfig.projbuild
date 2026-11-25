@@ -1,0 +1,15 @@
+menu "Device session example"
+    config MM_EXAMPLE_USB_JTAG
+        bool "Use the built-in USB Serial/JTAG port (default: USB-to-UART bridge)"
+        depends on SOC_USB_SERIAL_JTAG_SUPPORTED
+        default n
+    config MM_EXAMPLE_PEER_ADDRESS
+        string "Enrolled BLE identity address, e.g. AA:BB:CC:DD:EE:FF"
+        default ""
+        help
+            With no enrolled address only the wired console is started.
+    config MM_EXAMPLE_PEER_TYPE
+        int "Enrolled BLE identity address type (public=0, random=1)"
+        range 0 1
+        default 0
+endmenu
