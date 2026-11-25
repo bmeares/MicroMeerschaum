@@ -12,6 +12,93 @@ def open_role(role, path, create=False):
                      receiver=role != "origin", create=create)
 
 
+def identity_address():
+    """Read this ESP32-S3's fixed public identity address at its own console."""
+    import aioble
+    aioble.config(addr_mode=0, bond=True, le_secure=True, mitm=True, io=3)
+    return aioble.config("mac")
+
+
+# The pinned aioble has one shared IRQ dispatcher and no unregister operation.
+# Leave one inert handler installed between explicit commissioning windows.
+_enrollment = None
+_registered = False
+_INPUT = 2
+_DISPLAY = 3
+
+
+def _passkey_irq(event, data):
+    if event == 31 and _enrollment is not None:  # _IRQ_PASSKEY_ACTION
+        _enrollment.respond(*data)
+
+
+class _Enrollment:
+    def __init__(self, device, code, action):
+        if not isinstance(code, str) or len(code) != 6 or any(c not in "0123456789" for c in code):
+            raise ValueError("enter a fresh six-digit passkey")
+        self.device = device
+        self.code = int(code)
+        self.action = action
+        self.connection = None
+        self.io = 0 if action == _DISPLAY else 2  # DisplayOnly or KeyboardOnly.
+
+    def __enter__(self):
+        global _enrollment, _registered
+        import aioble
+        from aioble.core import register_irq_handler
+        if _enrollment is not None:
+            raise ValueError("enrollment already in progress")
+        if not _registered:
+            register_irq_handler(_passkey_irq, None)
+            _registered = True
+        aioble.config(addr_mode=0, bond=True, le_secure=True, mitm=True, io=self.io)
+        _enrollment = self
+        return self
+
+    def respond(self, handle, action, _number):
+        from aioble.core import ble
+        from aioble.device import DeviceConnection
+        conn = DeviceConnection._connected.get(handle)
+        if (action == self.action and self.connection is None and conn is not None
+                and conn.is_connected() and conn.device == self.device):
+            self.connection = conn
+            ble.gap_passkey(handle, action, self.code)
+
+    def verify(self, conn):
+        if self.connection is not conn or not (conn.encrypted and conn.authenticated and conn.bonded):
+            raise OSError("passkey-authenticated bond required")
+
+    def __exit__(self, *exception):
+        global _enrollment
+        import aioble
+        _enrollment = None
+        self.code = self.connection = None
+        aioble.config(bond=True, le_secure=True, mitm=True, io=3)
+
+
+async def enroll_receiver(device, code):
+    """Advertise for one expected central using the operator's fresh passkey."""
+    import aioble
+    import asyncio
+    with _Enrollment(device, code, _DISPLAY) as enrollment:
+        async with await aioble.advertise(100000, name=b"MM-enroll", timeout_ms=60000) as conn:
+            if conn.device != device:
+                raise OSError("unexpected commissioning peer")
+            with conn.timeout(30000):
+                while not conn.encrypted:
+                    await asyncio.sleep_ms(20)
+            enrollment.verify(conn)
+
+
+async def enroll_sender(device, code):
+    """Connect to one expected peripheral and enter its out-of-band passkey."""
+    with _Enrollment(device, code, _INPUT) as enrollment:
+        async with await device.connect() as conn:
+            await conn.pair(bond=True, le_secure=True, mitm=True, io=enrollment.io)
+            enrollment.verify(conn)
+            await conn.disconnected(timeout_ms=30000)
+
+
 def enrolled(device, node):
     # Fixed-address, previously enrolled, authenticated BLE bond on this board.
     def resolve(connection):
@@ -21,6 +108,7 @@ def enrolled(device, node):
 
 
 async def receive_window(pipe, device, sender):
+    identity_address()
     peripheral = Peripheral(pipe, enrolled(device, sender))
     try:
         await peripheral.serve_once()
@@ -29,6 +117,7 @@ async def receive_window(pipe, device, sender):
 
 
 async def send_window(pipe, device, issuer):
+    identity_address()
     async with await device.connect() as connection:
         if not connection.encrypted:
             await connection.pair(bond=True, mitm=True, le_secure=True)

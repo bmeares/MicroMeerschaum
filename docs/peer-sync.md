@@ -72,7 +72,34 @@ For A=1 → B=2 → D=9, provision the same origin, Pipe key, generation and fin
 
 B builds onward batches using `pipe.batch()` or `mm_peer_batch()` on its incoming journal. It appends itself to an observed path, splitting the batch at a path boundary as necessary. The original record bytes, sequence, stream generation and final destination travel unchanged. A route-only arrival leaves the outgoing sequence cursor in place. The current BLE forwarding profile marks the new hop as BLE with timestamp zero (unknown). `pipe.routes()` returns each observed interval as `(first, last, authenticated_sender, reported_node_ids)`. Native `mm_journal_route_get()` also supplies the reported hop times and transports.
 
-The MicroPython BLE example provides `open_role`, `receive_window` and `send_window`. For example, after mounting its volume at `/mm` and commissioning fixed-address authenticated bonds, B can run the following whenever the respective peers are available. Supply the enrolled aioble Device objects for A and D. An interrupted window leaves B's journal ready for the next connection. [MicroPython BLE example](../examples/micropython/offline_relay.py)
+### Commission a fresh pair over their serial consoles
+
+Use two ESP32-S3 boards running the release MicroPython firmware. Copy the example onto each board with `mpremote connect "$PORT" fs cp examples/micropython/offline_relay.py :offline_relay.py`. Open a separate serial REPL for each board. On **each** board run the following to select its fixed public BLE address and display it. Identify which physical board will send and which will receive. [MicroPython BLE example](../examples/micropython/offline_relay.py)
+
+```python
+import aioble, asyncio
+from offline_relay import identity_address, enroll_receiver, enroll_sender
+addr_type, addr = identity_address()
+print(addr_type, aioble.Device(addr_type, addr).addr_hex())
+```
+
+At the receiver's REPL, construct `origin_device = aioble.Device(0, "aa:bb:cc:dd:ee:ff")` with the **sender's reported address**. At the sender's REPL, construct `relay_device = aioble.Device(0, "11:22:33:44:55:66")` with the **receiver's reported address**. Store each expected peer address alongside its assigned node ID in that board's application configuration.
+
+Generate a fresh six-digit passkey on the operator's trusted computer with `python3 -c 'import secrets; print("%06d" % secrets.randbelow(1000000))'`. Use this code once, including any leading zeros. Start the receiver command first, enter the code at its prompt, then start the sender command and enter the same code at the other serial console.
+
+```python
+# Receiver REPL
+asyncio.run(enroll_receiver(origin_device, input("One-time passkey: ")))
+```
+
+```python
+# Sender REPL
+asyncio.run(enroll_sender(relay_device, input("One-time passkey: ")))
+```
+
+Both commands must finish successfully. The receiver uses DisplayOnly and the sender KeyboardOnly, with bonding, MITM authentication and LE Secure Connections enabled on both. The temporary passkey handler answers once for the expected device and action. aioble stores the resulting keys in `ble_secrets.json` on each board's Python filesystem. Preserve this file across ordinary reboots. Repeat with a new passkey for each additional pair.
+
+For example, after mounting its volume at `/mm` and commissioning both adjacent peers, B can run the following whenever those peers are available. Supply the enrolled aioble Device objects for A and D. An interrupted window leaves B's journal ready for the next connection.
 
 ```python
 import asyncio
