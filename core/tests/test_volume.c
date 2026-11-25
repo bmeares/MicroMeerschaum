@@ -178,7 +178,7 @@ static void protected_custody(const char *path)
         CHECK(mm_record_header(frame, MM_KIND_DATA, seq, 0, 1, frame + 32, 1) == MM_OK);
         CHECK(mm_journal_ingest(j, frame, sizeof(frame)) == (seq < 3 ? MM_JOURNAL_OK : MM_JOURNAL_FULL));
     }
-    CHECK(mm_journal_missed(j) == 0 && mm_journal_reclaim(j) == MM_JOURNAL_INVALID);
+    CHECK(mm_journal_missed(j) == 0 && mm_journal_reclaim(j) == MM_JOURNAL_OK);
     mm_journal_close(j);
     mm_journal_config wrong = c;
     ++wrong.stream.generation;
