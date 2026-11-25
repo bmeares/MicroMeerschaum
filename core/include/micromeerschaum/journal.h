@@ -68,6 +68,21 @@ uint64_t mm_journal_prefix(const mm_journal *j);     /* Contiguous accounted-for
 uint64_t mm_journal_high(const mm_journal *j);       /* Highest allocated or received sequence. */
 uint64_t mm_journal_confirmed(const mm_journal *j);  /* Sender's durable receipt position. */
 
+/* A received sequence range, its locally authenticated sender, and the route
+ * reported by that sender, oldest hop first. Enumeration order is unspecified. */
+typedef struct {
+    uint64_t first, last, sender;
+    size_t hop_count;
+    mm_hop hops[MM_BATCH_MAX_HOPS];
+} mm_route_range;
+
+size_t mm_journal_route_count(const mm_journal *j);
+mm_journal_status mm_journal_route_get(const mm_journal *j, size_t index, mm_route_range *out);
+/* Called after envelope validation. Record the authenticated route along with
+ * the checked original records. A full route store withholds acceptance. */
+mm_journal_status mm_journal_ingest_route(mm_journal *j, const uint8_t *records, size_t len,
+                                          const mm_route_range *route);
+
 /* Number of samples missed at admission awaiting a sequence-bearing loss
  * record. Reclaim automatically attempts to materialize the counter. */
 uint64_t mm_journal_missed(const mm_journal *j);

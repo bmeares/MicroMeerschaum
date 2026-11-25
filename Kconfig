@@ -5,4 +5,13 @@ menu "MicroMeerschaum"
         help
             Provide the ESP-IDF client for the hosted binary ingest endpoint.
             The application provisions the receiver identity, URL and API key.
+    config MICROMEERSCHAUM_SQLITE
+        bool "Enable the SQLite local Pipe instance"
+        default n
+        help
+            Store typed rows and outgoing records on a mounted LittleFS volume.
+    config MICROMEERSCHAUM_NIMBLE
+        bool "Enable NimBLE peer transport"
+        depends on BT_NIMBLE_ENABLED && BT_NIMBLE_ROLE_CENTRAL && BT_NIMBLE_ROLE_PERIPHERAL
+        default n
 endmenu
