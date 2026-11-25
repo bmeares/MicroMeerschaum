@@ -166,7 +166,7 @@ def guarded_write(config, request):
     token = secrets.token_hex(8)
     guard = WriteGuard(config, request["key"], token)
     try:
-        report({"pending": guard.instruction("Outcome unknown after sending write.", guard.token)})
+        report({"pending": guard.instruction("Outcome unknown after sending write.")})
         try:
             data = exchange(config, request, token)
             if not isinstance(data, str):
@@ -189,7 +189,7 @@ def guarded_write(config, request):
 
 if __name__ == "__main__":
     if "WriteGuard" not in globals():  # Running the source directly.
-        from write_guard import WriteGuard, reconcile
+        from write_guard import WriteGuard, pending_write, reconcile
     try:
         inputs = json.loads(sys.stdin.readline())
         config, request = inputs["config"], inputs["request"]
@@ -197,6 +197,8 @@ if __name__ == "__main__":
             guarded_write(config, request)
         elif request["op"] == "reconcile":
             report({"ok": True, "data": reconcile(config, request["token"])})
+        elif request["op"] == "pending_write":
+            report({"ok": True, "data": pending_write(config, request["key"], request["label"])})
         else:
             report({"ok": True, "data": exchange(config, request)})
     except Exception as failure:

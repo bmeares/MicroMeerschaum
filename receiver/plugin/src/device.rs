@@ -168,6 +168,19 @@ fn catalog(config: &Value) -> Result<Vec<Entry>> {
     }
 }
 
+fn write_incident_or(req: &Request, key: &Key, failure: Error) -> Error {
+    let query = json!({"op":"pending_write","key":key,"label":req.label});
+    match exchange(&req.config, query) {
+        Ok(Value::String(incident)) => error(incident),
+        _ => failure,
+    }
+}
+
+fn catalog_entry(req: &Request, key: &Key) -> Result<Option<Entry>> {
+    let entries = catalog(&req.config).map_err(|failure| write_incident_or(req, key, failure))?;
+    Ok(entries.into_iter().find(|entry| &entry.key == key))
+}
+
 fn key_of(context: &Value) -> Result<Key> {
     let p = &context["pipe"]["keys"];
     serde_json::from_value(json!([
@@ -305,11 +318,12 @@ fn frame(rows: Vec<Value>, query: &Value) -> Result<Frame> {
 
 fn write(req: &Request, key: &Key, data: Option<Frame>) -> Result<Value> {
     let config = &req.config;
-    if !catalog(config)?
-        .iter()
-        .any(|entry| &entry.key == key && entry.write)
-    {
-        return Err(error("Pipe is not exposed for writing."));
+    if !catalog_entry(req, key)?.is_some_and(|entry| entry.write) {
+        return Err(write_incident_or(
+            req,
+            key,
+            error("Pipe is not exposed for writing."),
+        ));
     }
     let frame = data.ok_or_else(|| error("Pipe.sync requires rows."))?;
     if frame.height() > MAX_ROWS {
@@ -379,7 +393,7 @@ pub(crate) fn call(req: &Request, data: Option<Frame>) -> Result<Reply> {
             Err(reason) => json!([false, reason.to_string()]),
         })),
         _ => {
-            let e = catalog(config)?.into_iter().find(|e| e.key == key);
+            let e = catalog_entry(req, &key)?;
             Ok(Reply::json(match method {
                 "pipe_exists" => json!(e.is_some()),
                 "get_pipe_id" => json!(e.map(|e| e.id)),
