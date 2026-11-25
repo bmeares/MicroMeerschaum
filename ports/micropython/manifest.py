@@ -1,0 +1,1 @@
+freeze(".", "micromeerschaum.py")
