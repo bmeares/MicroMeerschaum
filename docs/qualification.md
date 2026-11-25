@@ -17,6 +17,7 @@ Use these results to choose an integration path and repeat the checks on your de
 | Surface | Acceptance result |
 | --- | --- |
 | Host Pipe on ESP32-S3 | Meerschaum discovered a live Pipe, pushed two SQLite source rows over a pseudo-terminal bridged to the emulated UART, pulled the rows into a second SQLite Pipe and read the same rows after a cold boot. |
+| Desktop BLE instance | In a disposable Linux guest, Meerschaum 5.1.6, Bleak 3.1.0 and BlueZ 5.88 enrolled the emulated board with a passkey. The native plugin discovered its Pipe, ran a permitted action, received a denial for a private action, and transferred two rows from SQLite to the board journal and back to SQLite. |
 | Host shell and copy | Meerschaum 5.1.5 and 5.1.6 exercised discovery, CLI selection, bounded reads and writes, action completion and interrupted writes. The standard `copy pipes` action copied a small exposed Pipe into SQL and copied a SQL Pipe into an empty, writable device Pipe. |
 | MicroPython management GATT | Two ESP32-S3 instances exercised authenticated pairing, application authorization, fragmented action replies, discovery, reads and writes. The test revoked the enrolled peer and verified denial. |
 | Native shell and session | The C/C++ tests exercised line editing, bounded replies, action permissions, source and push-only Pipes and a lost delivery receipt. An ESP-IDF 5.5.6 application served its human shell and framed catalog on one emulated UART, rejected unpaired writes and subscriptions, and completed bonded reads, actions and a partial-command disconnect over GATT. QEMU ran all three Arduino-ESP32 3.3.6 sketches from the release ZIP, including tab completion and `show uptime` on **ActionShell**. |
@@ -32,7 +33,24 @@ python3 ports/micropython/tests/board_instance.py \
   --library receiver/plugin/target/release/libmicro.so
 ```
 
-For the management GATT cases, add `--management` to the following two-board command. Run it once with each mode using separate results directories.
+For the device-to-device management GATT cases, add `--management` to the two-board command. Run each mode with a separate results directory. [Two-board BLE test](#repeat-the-two-board-ble-test)
+
+## Repeat the desktop BLE test
+
+Use a disposable Linux VM with its own D-Bus, BlueZ and no attached Bluetooth adapters. The guest kernel needs `hci_vhci`. Install the source checkout, firmware, decompressed ELF, built plugin and Espressif emulator in the guest. In this example `esp-emu` is on PATH and `esp-emulator/` is the v1.2.0 source checkout.
+
+```sh
+python3 -m venv /tmp/micro-ble
+/tmp/micro-ble/bin/python -m pip install meerschaum==5.1.6 bleak==3.1.0 bumble==0.0.236
+sudo modprobe hci_vhci
+sudo systemctl start bluetooth
+sudo /tmp/micro-ble/bin/python ports/micropython/tests/board_host_ble.py \
+  micromeerschaum-0.2.0-ESP32-S3.bin --elf micromeerschaum-0.2.0-ESP32-S3.elf \
+  --efuse-tool esp-emulator/tools/make-efuse.py \
+  --library receiver/plugin/target/release/libmicro.so --emulator "$(command -v esp-emu)"
+```
+
+The host and firmware perform passkey pairing and GATT operations with their own Bluetooth stacks. Bumble simulates the controllers and radio link. The test runs the plugin CLI and transfers two rows from host SQLite to the board journal and back to a second SQLite Pipe.
 
 ## Repeat the two-board BLE test
 

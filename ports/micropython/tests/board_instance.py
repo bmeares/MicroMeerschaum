@@ -90,7 +90,7 @@ def serial_port(uart):
 WORKLOAD = """
 import sys, meerschaum as mrsm
 boot = int(sys.argv[1])
-device = mrsm.Pipe('sensor', 'readings', instance='micro:bench')
+device = mrsm.Pipe('sensor', sys.argv[2], instance='micro:bench')
 local = mrsm.Pipe('host', 'readings', instance='sql:local', columns={'primary':'tick'})
 rows = [{'tick':1,'value':17},{'tick':2,'value':21}]
 assert device.exists(), device
@@ -178,7 +178,7 @@ def main():
                     )
                     assert "readings" in output, output
                     subprocess.run(
-                        [sys.executable, "-c", WORKLOAD, str(boot)],
+                        [sys.executable, "-c", WORKLOAD, str(boot), "readings"],
                         env=env,
                         cwd=root,
                         check=True,
