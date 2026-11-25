@@ -20,4 +20,13 @@ menu "MicroMeerschaum"
         help
             Provide the bounded JSON session for explicitly admitted actions
             and published Pipe registrations over application-owned transports.
+    config MICROMEERSCHAUM_SESSION_GATT
+        bool "Enable the authenticated GATT management service"
+        depends on MICROMEERSCHAUM_DEVICE_SESSION && BT_NIMBLE_ENABLED && BT_NIMBLE_ROLE_PERIPHERAL
+        default n
+    config MICROMEERSCHAUM_SESSION_STACK
+        int "Management worker stack (bytes)"
+        depends on MICROMEERSCHAUM_SESSION_GATT
+        range 4096 65536
+        default 8192
 endmenu

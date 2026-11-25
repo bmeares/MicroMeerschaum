@@ -31,3 +31,7 @@ endif()
 if(CONFIG_MICROMEERSCHAUM_DEVICE_SESSION)
     target_sources(${COMPONENT_LIB} PRIVATE "ports/esp-idf/device_session.c")
 endif()
+
+if(CONFIG_MICROMEERSCHAUM_SESSION_GATT)
+    target_sources(${COMPONENT_LIB} PRIVATE "ports/esp-idf/session_gatt.c")
+endif()
