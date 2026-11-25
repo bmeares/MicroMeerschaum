@@ -60,6 +60,8 @@ Document sync groups up to eight rows that fit in the caller’s scratch buffer.
 
 The result’s `confirmed` counts the leading input rows committed by that call. On `MM_JOURNAL_UNCERTAIN`, reopen the same generation before reusing the handle. If `uncertain_count` is positive, compare the records beginning at `uncertain_first` with the corresponding original input, including its monotonic time, boot ID and exact payload. Account for matching rows before submitting the remaining suffix. Treat different bytes at an assigned identity as a conflict. The journal test injects a failed directory sync after publishing the second group and checks the candidate records after restart. [First-use and recovery test](../core/tests/test_pipe.cpp)
 
+The optional SQLite target uses the same Pipe handle. It adds typed keyed rows, bounded queries and an immutable outgoing record for each committed observation. [SQLite provisioning, receipt handling and device qualification](device-sqlite.md)
+
 ## What the implementations share
 
 The portable C library owns Pipe identity, document and batch encoding, local commit and recovery, and delivery progress. Both APIs use that library for these operations. The MicroPython module converts built-in containers and calls Python source plugins. The ESP-IDF component exposes the C interface directly and provides a thin C++ Pipe wrapper. Its firmware runs independently of a Python interpreter. Keep filesystem and radio calls in the port, and keep sensor timing, wake intervals and task orchestration in the application. [MicroPython native modules](https://docs.micropython.org/en/v1.28.0/develop/cmodules.html) · [ESP-IDF C++ support](https://docs.espressif.com/projects/esp-idf/en/release-v5.5/esp32/api-guides/cplusplus.html)

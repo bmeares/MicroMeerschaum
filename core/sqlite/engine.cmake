@@ -1,11 +1,20 @@
 # Pinned upstream SQLite amalgamation. Set FETCHCONTENT_SOURCE_DIR_MM_SQLITE3
 # to an extracted copy of this archive for offline builds.
 include(FetchContent)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
 FetchContent_Declare(mm_sqlite3
     URL https://www.sqlite.org/2026/sqlite-amalgamation-3510300.zip
     URL_HASH SHA256=acb1e6f5d832484bf6d32b681e858c38add8b2acdfd42ac5df24b8afb46552b4)
 FetchContent_MakeAvailable(mm_sqlite3)
 set(mm_amalgamation "${mm_sqlite3_SOURCE_DIR}/sqlite3.c")
+file(SHA256 "${mm_amalgamation}" mm_source_hash)
+file(SHA256 "${mm_sqlite3_SOURCE_DIR}/sqlite3.h" mm_header_hash)
+if(NOT mm_source_hash STREQUAL "9512509b1bccb7461f79bea8aad6280ae4699e925fa4804381b71f59e7efb0c5"
+    OR NOT mm_header_hash STREQUAL "19585c8b5230e9d4f223bf31b709ece7b6a0bb3faf00d8310625d8e58cda1b1d")
+    message(FATAL_ERROR "Expected the SQLite 3.51.3 amalgamation and header")
+endif()
 if(ESP_PLATFORM)
     # SQLite selects the pthread mutex implementation with the Unix VFS.
     # IDF provides pthreads with our own OS_OTHER VFS. Select those two

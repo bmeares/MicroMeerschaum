@@ -59,11 +59,11 @@ def provision(connector, metric, path, origin, generation, destination, location
     if retention not in ("keep-old", "keep-new"):
         raise ValueError("unknown retention policy")
     if instance == "sql:local":
-        if receiver or custodian is not None or retention != "keep-old":
-            raise ValueError("sql:local requires an originating destination delivery")
+        if receiver or retention != "keep-old":
+            raise ValueError("sql:local requires an originating Pipe with keep-old retention")
         import _mmsqlite
         store = _mmsqlite.open(path, pipe._wire, origin, generation, destination,
-                              columns, axis, autotime, create)
+                              columns, axis, autotime, create, custodian)
         budget = segment_bytes
     elif instance.startswith("journal:"):
         if columns is not None or axis is not None or autotime:
