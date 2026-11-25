@@ -3,6 +3,8 @@
 //! vectors in `../vectors` keep the two implementations in agreement.
 
 mod batch;
+pub mod document;
+pub mod protocol;
 mod record;
 mod segment;
 
@@ -12,7 +14,7 @@ pub use batch::{Batch, BatchHeader, Hop, Transport};
 pub use record::{Kind, Record};
 pub use segment::{Scan, SegmentHeader, scan_segment};
 
-/// Wire-format version this crate implements (`spec/wire-format.md`).
+/// Version of the original record, batch and segment formats (`spec/wire-format.md`).
 pub const WIRE_VERSION: u8 = 0;
 pub const RECORD_HEADER_LEN: usize = 32;
 pub const MAX_PAYLOAD: usize = 65536;

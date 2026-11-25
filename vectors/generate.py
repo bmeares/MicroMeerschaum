@@ -11,8 +11,8 @@ MAX_PAYLOAD = 65536
 MAX_KEY = 200
 MAX_HOPS = 8
 TRANSPORTS = 5
-KEY = b"plugin:walter\x1fradar\x1fswamp-rabbit-12"
-MAC = 0x30_30_F9_7A_2B_C4
+KEY = b"plugin:sensor\x1flevel\x1fgreenhouse-east"
+MAC = 0x02_11_22_33_44_55
 
 
 class Invalid(Exception):
@@ -232,7 +232,7 @@ def main():
     ], [
         ("clean", head + body, "ok end"),
         ("header_only", head, "ok end"),
-        ("resumed", segment_header(b"plugin:walter\x1fpeople\x1f", first_seq=1000, boot=9)
+        ("resumed", segment_header(b"plugin:sensor\x1fpeople\x1f", first_seq=1000, boot=9)
          + records(1000, 2, boot=9) + record(1002, b'{"uart_overflow":3}', kind=1, boot=9), "ok end"),
         ("torn_header", head + body + torn[:20], "ok truncated"),
         ("torn_payload", head + body + torn[:-5], "ok truncated"),
@@ -243,7 +243,7 @@ def main():
         ("seq_gap", head + records(1, 2, boot=4) + records(4, 2, boot=4), "ok seq_gap"),
         ("first_mismatch", segment_header(first_seq=5) + records(6, 2), "ok seq_gap"),
         ("middle_bit", head + flip(body, 37 + 20), "ok bad_crc"),
-        ("multibyte_key", segment_header("plugin:walter\x1frádar\x1f🐇".encode()) + records(1, 1), "ok end"),
+        ("multibyte_key", segment_header("plugin:sensor\x1fnível\x1f🌱".encode()) + records(1, 1), "ok end"),
         ("max_key", segment_header(b"c\x1fm\x1f" + b"l" * 196), "ok end"),
         ("short_fixed", head[:23], "truncated"),
         ("short_key", head[:30], "truncated"),
@@ -254,16 +254,16 @@ def main():
         ("key_len_201", segment_header(key=b"c\x1fm\x1f" + b"l" * 197), "bad_key"),
         ("header_bit", flip(head, 9), "bad_crc"),
         ("first_seq_0", segment_header(first_seq=0), "bad_seq"),
-        ("key_one_sep", segment_header(key=b"plugin:walter\x1fradar"), "bad_key"),
-        ("key_three_seps", segment_header(key=b"plugin:walter\x1fradar\x1fa\x1fb"), "bad_key"),
-        ("key_no_metric", segment_header(key=b"plugin:walter\x1f\x1fsite"), "bad_key"),
-        ("key_no_connector", segment_header(key=b"\x1fradar\x1fsite"), "bad_key"),
-        ("key_overlong", segment_header(key=b"plugin\xc0\xaf\x1fradar\x1f"), "bad_key"),
-        ("key_surrogate", segment_header(key=b"plugin\xed\xa0\x80\x1fradar\x1f"), "bad_key"),
-        ("key_cut_utf8", segment_header(key=b"plugin\x1fradar\x1fcaf\xc3"), "bad_key"),
+        ("key_one_sep", segment_header(key=b"plugin:sensor\x1flevel"), "bad_key"),
+        ("key_three_seps", segment_header(key=b"plugin:sensor\x1flevel\x1fa\x1fb"), "bad_key"),
+        ("key_no_metric", segment_header(key=b"plugin:sensor\x1f\x1fsite"), "bad_key"),
+        ("key_no_connector", segment_header(key=b"\x1flevel\x1fsite"), "bad_key"),
+        ("key_overlong", segment_header(key=b"plugin\xc0\xaf\x1flevel\x1f"), "bad_key"),
+        ("key_surrogate", segment_header(key=b"plugin\xed\xa0\x80\x1flevel\x1f"), "bad_key"),
+        ("key_cut_utf8", segment_header(key=b"plugin\x1flevel\x1fcaf\xc3"), "bad_key"),
     ], decode_segment)
 
-    hops2 = [(0x30_30_F9_7A_2B_C5, 1_793_000_000_123_456, 1), (0x0242AC110002, 1_793_000_001_000_000, 2)]
+    hops2 = [(0x02_11_22_33_44_56, 1_793_000_000_123_456, 1), (0x0242AC110002, 1_793_000_001_000_000, 2)]
     hops8 = [(i + 1, -i, i % TRANSPORTS) for i in range(MAX_HOPS)]
     three = records(17, 3)
     plain = batch_header([], 3) + three

@@ -1,45 +1,75 @@
 # MicroMeerschaum
 
-Meerschaum pipes for microcontrollers: a device journal, cursor-range sync, and
-durable acknowledgements that work the same over BLE, Wi-Fi or HTTPS, with
-lineage recorded at every hop.
+MicroMeerschaum lets an ESP32-S3 collect readings into a named Pipe while its radio sleeps. When a peer comes into range, the device can send its backlog over BLE. A relay can take custody while the final destination is offline. A Meerschaum server can also receive the original records over HTTPS and publish them as ordinary Pipe rows.
 
-**Status: pre-alpha.** Wire format version 0 ([spec/wire-format.md](spec/wire-format.md):
-records, journal segments, sync batches) is implemented in the C core and the
-Rust receiver, and will change without notice.
+A successful local `sync()` commits a reading on the device. The sender tracks delivery separately. If a connection drops after the peer commits, the sender retries the same record identities and the peer returns a receipt for the prefix it already holds. [How peer delivery works](docs/peer-sync.md)
 
-## Layout
+## Choose your starting point
 
-| Path | What |
-|---|---|
-| `spec/` | Wire-format specification |
-| `vectors/` | Shared test vectors, written by `generate.py` (an independent Python implementation); every implementation must pass them |
-| `core/` | Portable C11 device core: no heap after init, caller-supplied buffers |
-| `CMakeLists.txt`, `idf_component.yml` | ESP-IDF component over the C core |
-| `receiver/` | Native Rust receiver crate (not FFI); `examples/mm_dump.rs` checks journal segment files |
+| Environment | Install and first result |
+| --- | --- |
+| **MicroPython** on ESP32-S3 with 8 MiB flash and 2 MiB quad PSRAM | Flash `micromeerschaum-0.1.0-ESP32-S3.bin`. Install a short Python source module, sample the on-chip temperature, then reboot and read the saved observation. [Firmware and first reading](docs/micropython.md) |
+| **Arduino-ESP32** | In Arduino IDE choose **Sketch → Include Library → Add .ZIP Library** and select `MicroMeerschaum-0.1.0.zip`. Open **File → Examples → MicroMeerschaum → LocalPipe** and run it on an ESP32-S3 with formatted LittleFS. The highest sequence increases on each boot. [CLI installation and peer retry sketch](docs/device-api.md#what-arduino-esp32-adds) |
+| **ESP-IDF** C/C++ | Add the component below to your project. Build the storage example to append two readings and verify the saved group after reopening. [Storage and provisioning](docs/device-storage.md#run-the-storage-example) · [Named Pipe API](docs/device-api.md#one-temperature-pipe-in-two-environments) |
+| **Meerschaum** 5.1.5 | Install `mm_receiver-0.1.0-linux-x86_64.tar.gz` on a compatible Linux host or build the native plugin from source. Configure the device grant and output Pipe. Use `mrsm mm receiver status` to inspect receipt and replay progress. [Receiver installation and configuration](receiver/plugin/README.md) |
 
-Planned: a C++ ESP-IDF wrapper, a MicroPython native module over the same
-core, and a Meerschaum plugin over the receiver crate.
+Download the packages or the source archive for these examples from the [v0.1.0 release](https://github.com/bmeares/MicroMeerschaum/releases/tag/v0.1.0). The [qualification results](docs/qualification.md) distinguish host integration, emulated ESP32-S3 boots and the measurements to make on physical hardware.
 
-## Build and test
+## Try a two-node sync on a POSIX host
 
-```bash
-cmake -S core -B build -G Ninja && cmake --build build && ctest --test-dir build --output-on-failure
-cargo test --manifest-path receiver/Cargo.toml
-python3 vectors/generate.py && git diff --exit-code vectors/
-cargo run --manifest-path receiver/Cargo.toml --example mm_dump -- journal/*.seg
+From the source checkout, build the example with CMake and a C/C++ compiler. Two directories stand in for independent nodes. Each command starts a fresh process.
+
+```sh
+cmake -S core -B build -DMM_SANITIZE=OFF
+cmake --build build --target mm_sync_example
+site=$(mktemp -d)
+mkdir "$site/origin" "$site/peer"
+build/mm_sync_example collect "$site/origin" 21.4
+build/mm_sync_example collect "$site/origin" 21.7
+build/mm_sync_example send "$site/origin" "$site/peer"
+build/mm_sync_example send "$site/origin" "$site/peer"
+build/mm_sync_example collect "$site/origin" 21.9
 ```
 
-ESP-IDF projects can pin the component by commit through the IDF Component
-Manager:
+Both sends print `Peer confirmed through 2`. The last collection prints `Committed locally through 3`. The example transfers the batch and reply in process. The same journal can back a named document Pipe on a device. [Example source](examples/host/sync.c) · [C++ document example](examples/host/temperature.cpp)
+
+## Write a device Pipe
+
+After provisioning a local `sensor` / `temperature` Pipe, a MicroPython application can submit a column batch and read the local delivery state.
+
+```python
+from micromeerschaum import Pipe
+
+temperature = Pipe("sensor", "temperature")
+ok, message = temperature.sync({"tick": [41, 42], "celsius": [21.4, 21.7]})
+assert ok, message
+print(temperature.progress())  # high includes the two new records
+```
+
+For a source-driven Pipe, install a module implementing `fetch(pipe, **kw)` and call `Pipe("plugin:chip_sensor", "temperature").sync()` after provisioning. For indexed reads and corrections, choose the optional `sql:local` instance at registration. [MicroPython walkthrough](docs/micropython.md) · [On-device SQLite](docs/device-sqlite.md) · [HTTPS sender](docs/https-sender.md)
+
+Native projects can pin v0.1.0 in their component's `idf_component.yml` and include `micromeerschaum/pipe.h` or `micromeerschaum/pipe.hpp`.
 
 ```yaml
 dependencies:
   micromeerschaum:
     git: https://github.com/bmeares/MicroMeerschaum.git
-    version: <commit>
+    version: v0.1.0
 ```
+
+## Build and test
+
+```sh
+cmake -S core -B build/tests -DMM_WITH_SQLITE=ON
+cmake --build build/tests -j4
+ctest --test-dir build/tests --output-on-failure
+cargo test --manifest-path receiver/Cargo.toml --locked
+cargo test --manifest-path receiver/plugin/Cargo.toml --locked
+python3 vectors/generate.py && python3 vectors/generate_v1.py && git diff --exit-code vectors/
+```
+
+The C and Rust codecs share byte fixtures for v0 archives and generation-scoped v1 delivery. The release also exercises independent native and MicroPython processes, board images and HTTPS deployments. [Release qualification and reproduction](docs/qualification.md) · [Wire v0](spec/wire-format.md) · [Protocol v1](spec/protocol-v1.md) · [Document format](spec/document-v1.md) · [Design decisions](docs/adr/) · [Glossary](GLOSSARY.md)
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+[Apache-2.0](LICENSE)

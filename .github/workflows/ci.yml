@@ -13,12 +13,40 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        cc: [gcc, clang]
+        include:
+          - cc: gcc
+            cxx: g++
+          - cc: clang
+            cxx: clang++
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: cmake -S core -B build -G "Unix Makefiles" -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake -S core -B build -G "Unix Makefiles" -DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} -DCMAKE_BUILD_TYPE=Debug
       - run: cmake --build build
       - run: ctest --test-dir build --output-on-failure
+
+  micropython:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: micropython/micropython
+          ref: e0e9fbb17ed6fd06bb76e266ae554784c9c80804 # v1.28.0
+          path: micropython
+      - run: git -C micropython apply --check "$GITHUB_WORKSPACE/ports/micropython/patches/v1.28.0-nimble-passkey.patch"
+      - run: cmake -S core -B build -DMM_WITH_SQLITE=ON -DMM_SANITIZE=OFF
+      - run: cmake --build build -j4 && ctest --test-dir build --output-on-failure
+      - run: make -C micropython/ports/unix submodules
+      - run: make -C micropython/mpy-cross -j4
+      - run: |
+          make -C micropython/ports/unix -j4 MICROPY_PY_FFI=0 MM_WITH_SQLITE=1 \
+              MM_SQLITE_BUILD="$PWD/build" BUILD="$PWD/build/mm-unix" \
+              USER_C_MODULES="$PWD/ports/micropython"
+      - run: ports/micropython/tests/run.sh build/mm-unix/micropython --sqlite
+      - run: |
+          export MICROPYPATH="$PWD/ports/micropython:.frozen"
+          build/mm-unix/micropython ports/micropython/tests/gatt.py
+          python3 ports/micropython/tests/mixed_gatt.py build/mm_gatt_test_node build/mm-unix/micropython
 
   receiver:
     runs-on: ubuntu-24.04
@@ -29,11 +57,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: cargo test --locked
+      - run: cargo fmt --manifest-path plugin/Cargo.toml --check
+      - run: cargo clippy --manifest-path plugin/Cargo.toml --locked --all-targets -- -D warnings
+      - run: cargo test --manifest-path plugin/Cargo.toml --locked
 
   vectors:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 vectors/generate.py
+      - run: python3 vectors/generate_v1.py
       - run: git diff --exit-code vectors/ && test -z "$(git status --porcelain vectors/)"

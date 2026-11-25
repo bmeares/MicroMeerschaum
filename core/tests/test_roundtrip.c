@@ -12,7 +12,7 @@
         }                                                              \
     } while (0)
 
-static const char KEY[] = "plugin:walter\x1f" "radar\x1f" "bench";
+static const char KEY[] = "plugin:sensor\x1f" "level\x1f" "bench";
 static uint8_t buf[1 << 16];
 
 /* Appends one record (header, then payload) as a journal writer would. */
@@ -60,8 +60,8 @@ static int segment_roundtrip(void)
 
 static int batch_roundtrip(void)
 {
-    mm_batch b = {.origin = 0x3030F97A2BC4u, .key = KEY, .key_len = sizeof KEY - 1, .hop_count = 2, .count = 3};
-    b.hops[0] = (mm_hop){.node = 0x3030F97A2BC4u, .received_us = -5, .transport = MM_TRANSPORT_LOCAL};
+    mm_batch b = {.origin = 0x021122334455u, .key = KEY, .key_len = sizeof KEY - 1, .hop_count = 2, .count = 3};
+    b.hops[0] = (mm_hop){.node = 0x021122334455u, .received_us = -5, .transport = MM_TRANSPORT_LOCAL};
     b.hops[1] = (mm_hop){.node = 7, .received_us = 1793000000000000, .transport = MM_TRANSPORT_LTE};
     size_t at = mm_batch_header(buf, sizeof buf, &b);
     CHECK(at == 28 + sizeof KEY - 1 + 48);
@@ -88,7 +88,7 @@ static int encoders_reject_bad_input(void)
     CHECK(mm_record_header(header, MM_KIND_DATA, 1, 0, 0, buf, MM_RECORD_MAX_PAYLOAD + 1) == MM_BAD_LENGTH);
     CHECK(mm_segment_header(buf, sizeof buf, KEY, sizeof KEY - 1, 0, 0) == 0);
     CHECK(mm_segment_header(buf, 28 + sizeof KEY - 2, KEY, sizeof KEY - 1, 1, 0) == 0);
-    CHECK(mm_segment_header(buf, sizeof buf, "radar", 5, 1, 0) == 0);
+    CHECK(mm_segment_header(buf, sizeof buf, "level", 5, 1, 0) == 0);
     mm_batch b = {.key = KEY, .key_len = sizeof KEY - 1, .hop_count = MM_BATCH_MAX_HOPS + 1};
     CHECK(mm_batch_header(buf, sizeof buf, &b) == 0);
     b.hop_count = 1;

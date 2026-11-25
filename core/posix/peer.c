@@ -1,0 +1,109 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "micromeerschaum/peer.h"
+#include <string.h>
+
+mm_journal_status mm_peer_batch(mm_journal *origin, uint64_t after, uint32_t max_records,
+                                uint8_t *out, size_t cap, size_t *used)
+{
+    if (!used) return MM_JOURNAL_INVALID;
+    *used = 0;
+    if (!origin || !out) return MM_JOURNAL_INVALID;
+    if (mm_journal_needs_reopen(origin)) return MM_JOURNAL_UNCERTAIN;
+    const mm_journal_config *config = mm_journal_config_get(origin);
+    bool relay = config->mode == MM_JOURNAL_RECEIVER && config->role == MM_CUSTODY;
+    if (config->mode != MM_JOURNAL_ORIGIN && !relay)
+        return MM_JOURNAL_INVALID;
+
+    uint64_t high = mm_journal_high(origin);
+    if (after > high) return MM_JOURNAL_INVALID;
+    mm_v1_batch batch = {.stream = config->stream, .destination = config->destination};
+    if (max_records && after < high) {
+        uint64_t start;
+        mm_journal_status st = mm_journal_delivery_start(origin, after + 1, &start);
+        if (st != MM_JOURNAL_OK) return st;
+        after = start - 1;
+        if (relay) {
+            /* Split batches at an observed path boundary. A route-only retry
+             * adds audit evidence without creating a new outgoing identity. */
+            mm_route_range route;
+            size_t i = 0;
+            for (;;) {
+                st = mm_journal_route_get(origin, i++, &route);
+                if (st != MM_JOURNAL_OK) return st;
+                if (route.first <= start && start <= route.last) break;
+            }
+            if (route.hop_count >= MM_BATCH_MAX_HOPS) return MM_JOURNAL_INVALID;
+            memcpy(batch.hops, route.hops, route.hop_count * sizeof(mm_hop));
+            batch.hop_count = route.hop_count;
+            if (high > route.last) high = route.last;
+        }
+    }
+    if (relay) batch.hops[batch.hop_count++] = (mm_hop){config->issuer, 0, MM_TRANSPORT_BLE};
+    size_t offset = mm_v1_batch_header(out, cap, &batch);
+    if (!offset) return MM_JOURNAL_TOO_SMALL;
+    const size_t max_records_bytes = MM_JOURNAL_SEGMENT_MAX - MM_SEGMENT_HEADER_MAX;
+    if (cap - offset > max_records_bytes) cap = offset + max_records_bytes;
+
+    while (after < high && batch.count < max_records) {
+        size_t record_len = 0;
+        mm_journal_status status = mm_journal_read(origin, after + 1, out + offset,
+                                                   cap - offset, &record_len);
+        if ((status == MM_JOURNAL_TOO_SMALL || status == MM_JOURNAL_NOT_FOUND) && batch.count) break;
+        if (status != MM_JOURNAL_OK) return status;
+        offset += record_len;
+        batch.count++;
+        after++;
+    }
+    if (batch.count) mm_v1_batch_header(out, cap, &batch);
+    *used = offset;
+    return MM_JOURNAL_OK;
+}
+
+mm_journal_status mm_peer_receive(mm_journal *receiver, uint64_t authenticated_sender,
+                                  const uint8_t *data, size_t len, uint8_t *reply,
+                                  size_t reply_cap, size_t *reply_len)
+{
+    if (!reply_len) return MM_JOURNAL_INVALID;
+    *reply_len = 0;
+    if (!receiver || !data || !reply) return MM_JOURNAL_INVALID;
+    const mm_journal_config *config = mm_journal_config_get(receiver);
+    if (config->mode != MM_JOURNAL_RECEIVER) return MM_JOURNAL_INVALID;
+
+    mm_v1_batch batch;
+    size_t header_len;
+    uint64_t first, last;
+    if (mm_v1_batch_validate(data, len, &batch, &header_len, &first, &last) != MM_OK ||
+        !mm_stream_equal(&batch.stream, &config->stream) ||
+        batch.destination != config->destination ||
+        authenticated_sender != (batch.hop_count ? batch.hops[batch.hop_count-1].node : batch.stream.origin) ||
+        (config->role == MM_CUSTODY && batch.hop_count == MM_BATCH_MAX_HOPS))
+        return MM_JOURNAL_INVALID;
+    if (reply_cap < MM_RECEIPT_FIXED_SIZE + config->stream.key_len) return MM_JOURNAL_TOO_SMALL;
+
+    mm_journal_status status;
+    if (batch.count) {
+        mm_route_range route = {.first = first, .last = last, .sender = authenticated_sender,
+                                .hop_count = batch.hop_count};
+        memcpy(route.hops, batch.hops, route.hop_count * sizeof(mm_hop));
+        status = mm_journal_ingest_route(receiver, data + header_len, len - header_len, &route);
+    } else status = mm_journal_ingest(receiver, NULL, 0);
+    if (status != MM_JOURNAL_OK) return status;
+    mm_receipt receipt = {
+        .stream = config->stream, .role = config->role, .issuer = config->issuer,
+        .destination = config->destination, .through = mm_journal_prefix(receiver)
+    };
+    *reply_len = mm_receipt_encode(reply, reply_cap, &receipt);
+    return *reply_len ? MM_JOURNAL_OK : MM_JOURNAL_INVALID;
+}
+
+mm_journal_status mm_peer_confirm(mm_journal *origin, uint64_t authenticated_issuer,
+                                  const uint8_t *reply, size_t len)
+{
+    if (!origin || !reply) return MM_JOURNAL_INVALID;
+    const mm_journal_config *config = mm_journal_config_get(origin);
+    uint64_t issuer = config->mode == MM_JOURNAL_RECEIVER ? config->destination : config->issuer;
+    if (authenticated_issuer != issuer) return MM_JOURNAL_INVALID;
+    mm_receipt receipt;
+    if (mm_receipt_decode(reply, len, &receipt) != MM_OK) return MM_JOURNAL_INVALID;
+    return mm_journal_confirm(origin, &receipt);
+}

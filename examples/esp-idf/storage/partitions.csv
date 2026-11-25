@@ -1,0 +1,4 @@
+# Name, Type, SubType, Offset, Size
+nvs,data,nvs,0x9000,0x6000
+factory,app,factory,0x10000,1M
+storage,data,littlefs,0x110000,1M
