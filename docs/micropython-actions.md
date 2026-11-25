@@ -1,6 +1,6 @@
 # Device actions on MicroPython
 
-Open a Pipe using the application's normal boot configuration. At the Python REPL, expose that live handle and enter the action prompt. Each prompt line invokes one action. Tab completes an action name, `?` lists names, and a prefix followed by `?` lists matches. Enter `exit`, Ctrl-D or Ctrl-C to return to Python. [Provision a MicroPython Pipe](micropython.md)
+Open a Pipe using the application's normal boot configuration. At the Python REPL, expose that live handle and enter the action prompt. Each prompt line invokes one action. Tab completes an action name, `?` lists names, and a prefix followed by `?` lists matches. Ctrl-C clears the current line. Enter `exit`, `quit` or Ctrl-D at an empty prompt to return to Python. [Provision a MicroPython Pipe](micropython.md)
 
 ```python
 from micromeerschaum import dispatch, expose, make_action, shell
@@ -20,18 +20,18 @@ shell()
 ```
 
 ```text
-micro> show actions
+[ journal:local ] > show actions
 copy pipes
 device label
 help
 show actions
 show pipes
 sync pipes
-micro> device label
+[ journal:local ] > device label
 room monitor
-micro> sync pipes -c plugin:chip_sensor
+[ journal:local ] > sync pipes -c plugin:chip_sensor
 plugin:chip_sensor temperature None journal:local  committed 1 input rows
-micro> exit
+[ journal:local ] > exit
 >>>
 ```
 

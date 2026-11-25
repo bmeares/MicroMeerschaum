@@ -239,7 +239,7 @@ static void shell(void)
     CHECK(mm_action_shell_init(&s, local, MM_ACTION_QUOTED, buf, sizeof buf, emit, &c, true));
     unsigned before = calls;
     feed(&s, "piq\bp\177n\t\r\n");
-    CHECK(calls == before + 1 && strstr(c.text, "mm> ping ") && strstr(c.text, "specific"));
+    CHECK(calls == before + 1 && strstr(c.text, "[ journal:local ] > ping ") && strstr(c.text, "specific"));
     feed(&s, "n\t\003help ping\n");
     CHECK(strstr(c.text, "Check node."));
     c.len = 0;

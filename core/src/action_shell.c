@@ -2,7 +2,7 @@
 #include "micromeerschaum/actions.h"
 #include <string.h>
 
-static const char prompt[] = "mm> ";
+static const char prompt[] = "[ journal:local ] > ";
 
 static bool write_bytes(mm_action_shell *s, const char *p, size_t len)
 {
@@ -77,7 +77,8 @@ static bool submit(mm_action_shell *s)
     while (end > start && s->line[end - 1] == ' ') end--;
     if (s->discard) {
         write_text(s, "Invalid or overlong line.\r\n");
-    } else if (end - start == 4 && memcmp(s->line + start, "exit", 4) == 0) {
+    } else if (end - start == 4 && (memcmp(s->line + start, "exit", 4) == 0 ||
+                                    memcmp(s->line + start, "quit", 4) == 0)) {
         s->active = false;
         return false;
     } else if (end > start) {

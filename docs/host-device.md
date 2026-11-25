@@ -120,6 +120,8 @@ mrsm micro action 'show pipes -m temperature' -i micro:bench
 mrsm micro shell -i micro:bench
 ```
 
+For the standard desktop shell, run `mrsm -i micro:bench`. Use `show pipes` to inspect the device through the instance connector and `micro action 'show actions'` to ask the device for its commands. Inside `micro shell`, enter the device commands directly. The dedicated prompt uses Meerschaum's configured shell template, result icons, and the Reedline editor. Arrow keys recall actions from this session, Ctrl-R searches its history, and Ctrl-C clears the line. Piped input receives plain replies.
+
 Quote a whole action line containing flags to pass them to the device. In the prompt, Tab requests the permitted completions from the running device. Enter runs the line once. `exit`, `quit` or Ctrl-D returns to the host. The prompt connects through the configured serial or BLE transport.
 
 ## Exercise the host plugin

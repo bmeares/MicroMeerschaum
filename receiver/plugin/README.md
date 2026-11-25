@@ -12,12 +12,12 @@ Install `micro` from the Meerschaum registry on the CLI host, API and worker as 
 mrsm install plugins micro
 ```
 
-Alternatively, on Linux x86-64 with glibc, extract the GitHub release archive into the plugin directory used by the API and worker. It supplies `micro/plugin.toml` and `micro/libmicro.so`. [Download the Linux plugin](https://github.com/bmeares/MicroMeerschaum/releases/download/v0.2.0/micro-0.2.0-linux-x86_64.tar.gz) · [Release source](https://github.com/bmeares/MicroMeerschaum/archive/refs/tags/v0.2.0.tar.gz)
+Alternatively, on Linux x86-64 with glibc, extract the GitHub release archive into the plugin directory used by the API and worker. It supplies `micro/plugin.toml` and `micro/libmicro.so`. [Download the Linux plugin](https://github.com/bmeares/MicroMeerschaum/releases/download/v0.2.1/micro-0.2.1-linux-x86_64.tar.gz) · [Release source](https://github.com/bmeares/MicroMeerschaum/archive/refs/tags/v0.2.1.tar.gz)
 
 ```sh
 export MRSM_PLUGINS_DIR="${MRSM_PLUGINS_DIR:-$HOME/.config/meerschaum/plugins}"
 mkdir -p "$MRSM_PLUGINS_DIR"
-tar -xzf micro-0.2.0-linux-x86_64.tar.gz -C "$MRSM_PLUGINS_DIR"
+tar -xzf micro-0.2.1-linux-x86_64.tar.gz -C "$MRSM_PLUGINS_DIR"
 ```
 
 **Upgrading from `mm_receiver` 0.1.0.** Stop the API and its replay jobs. Move the old package outside every Meerschaum plugin directory. In the configuration used by the API and worker, rename the `plugins.mm_receiver` section to `plugins.micro`. Keep its contents, including any environment-variable references, database connection, grants and output mappings. For an environment-managed configuration, make the same key rename in the deployment source.

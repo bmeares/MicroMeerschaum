@@ -155,9 +155,10 @@ registry.unexpose(p)
 registry.expose(p)
 assert not call("write", key=key, rows=[row])["ok"]
 screen = io.StringIO()
-registry.shell(io.StringIO("field hi\r\nsho?\nfield fai\t\nexit\n"), screen)
+registry.shell(io.StringIO("field accidental\x03field hi\r\nsho?\nfield fai\t\nexit\n"), screen)
 assert "show pipes" in screen.getvalue() and "unavailable" in screen.getvalue()
-assert calls[-1] == ["hi"]
+assert ["accidental"] not in calls and calls[-1] == ["hi"]
+assert "^C\n[ journal:local ] > " in screen.getvalue()
 assert not json.loads(DeviceSession(registry).handle(frame("actions")[:-1])[len(PREFIX):])["ok"]
 for pipe in (p, source, sink, hidden):
     pipe.close()

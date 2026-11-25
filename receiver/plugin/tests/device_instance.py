@@ -140,13 +140,22 @@ def shell():
         while expected not in transcript:
             ready = select.select([master], [], [], max(0, end - time.monotonic()))[0]
             assert ready, transcript
-            transcript += os.read(master, 8192)
+            chunk = os.read(master, 8192)
+            if b"\x1b[6n" in chunk:
+                os.write(master, b"\x1b[1;1R")
+            transcript += chunk
+        transcript = transcript.split(expected, 1)[1]
 
     try:
-        until(b"micro:bench> ")
-        os.write(master, b"sh\t\n")
+        until(b"micro:bench")
+        os.write(master, b"abandon\x03")
+        until(b"micro:bench")
+        os.write(master, b"sh\t")
+        until(b"show pipes")
+        os.write(master, b"\r")
         until(b"Ran show pipes")
-        os.write(master, b"exit\n")
+        until(b"micro:bench")
+        os.write(master, b"quit\r")
         assert proc.wait(12) == 0
     finally:
         if proc.poll() is None:

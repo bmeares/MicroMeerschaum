@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Named device actions and an interactive prompt for the MicroPython REPL."""
 
+_PROMPT = "[ journal:local ] > "
 MAX_LINE = 4224
 _FLAGS = {"-c": 0, "-m": 1, "-l": 2, "-i": 3}
 _ALIASES = {"--connector-keys": "-c", "--metric-keys": "-m", "--location-keys": "-l",
@@ -218,60 +219,64 @@ class ActionRegistry:
         return ok, "\n".join(results)
 
     def shell(self, reader=None, writer=None):
-        """Enter the device prompt. Exit, Ctrl-D or Ctrl-C returns to the caller."""
+        """Enter the device prompt. Ctrl-C cancels input. Exit or Ctrl-D at an empty line returns."""
         import sys
         reader = reader or sys.stdin
         writer = writer or sys.stdout
         line, too_long, previous_cr = "", False, False
-        writer.write("micro> ")
-        try:
-            while True:
+        writer.write(_PROMPT)
+        while True:
+            try:
                 char = reader.read(1)
-                if not char or char in ("\x04", "\x03"):
-                    break
-                if char == "\n" and previous_cr:
-                    previous_cr = False
-                    continue
-                previous_cr = char == "\r"
-                if char in ("\n", "\r"):
-                    writer.write("\n")
-                    if too_long:
-                        writer.write("action line too long\n")
-                    elif line.strip() in ("exit", "quit"):
-                        return
-                    elif line.strip():
-                        if line.endswith("?"):
-                            try:
-                                message = "\n".join(self.complete(line[:-1]))
-                            except ValueError as e:
-                                message = str(e)
-                        else:
-                            _, message = self.dispatch(line)
-                        writer.write(message + "\n")
-                    line, too_long = "", False
-                    writer.write("micro> ")
-                elif too_long:
-                    continue
-                elif char in ("\b", "\x7f"):
-                    if line:
-                        line = line[:-1]
-                        writer.write("\b \b")
-                elif char == "\t":
-                    try:
-                        matches = self.complete(line)
-                    except ValueError:
-                        matches = []
-                    if len(matches) == 1:
-                        line = matches[0] + " "
-                    writer.write("\n" + "\n".join(matches) + "\nmicro> " + line)
-                elif ord(char) >= 32:
-                    line += char
-                    if len(line.encode()) > MAX_LINE:
-                        too_long = True
+            except KeyboardInterrupt:
+                char = "\x03"
+            if char == "\x03":
+                line, too_long, previous_cr = "", False, False
+                writer.write("^C\n" + _PROMPT)
+                continue
+            if not char or (char == "\x04" and not line and not too_long):
+                break
+            if char == "\n" and previous_cr:
+                previous_cr = False
+                continue
+            previous_cr = char == "\r"
+            if char in ("\n", "\r"):
+                writer.write("\n")
+                if too_long:
+                    writer.write("action line too long\n")
+                elif line.strip() in ("exit", "quit"):
+                    return
+                elif line.strip():
+                    if line.endswith("?"):
+                        try:
+                            message = "\n".join(self.complete(line[:-1]))
+                        except ValueError as e:
+                            message = str(e)
                     else:
-                        writer.write(char)
-        except KeyboardInterrupt:
-            pass
+                        _, message = self.dispatch(line)
+                    writer.write(message + "\n")
+                line, too_long = "", False
+                writer.write(_PROMPT)
+            elif too_long:
+                continue
+            elif char in ("\b", "\x7f"):
+                if line:
+                    line = line[:-1]
+                    writer.write("\b \b")
+            elif char == "\t":
+                try:
+                    matches = self.complete(line)
+                except ValueError:
+                    matches = []
+                if len(matches) == 1:
+                    line = matches[0] + " "
+                writer.write("\n" + "\n".join(matches) + "\n" + _PROMPT + line)
+            elif ord(char) >= 32:
+                line += char
+                if len(line.encode()) > MAX_LINE:
+                    too_long = True
+                else:
+                    writer.write(char)
         writer.write("\n")
 
 

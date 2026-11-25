@@ -17,7 +17,6 @@ const TRANSPORT: &str = concat!(
     "\n",
     include_str!("transport.py")
 );
-const SHELL: &str = include_str!("shell.py");
 const MAX_ROWS: usize = 128;
 const MAX_CATALOG: usize = 4096;
 pub(crate) const METHODS: &[&str] = &[
@@ -33,7 +32,7 @@ pub(crate) const METHODS: &[&str] = &[
     "get_pipe_columns_types",
 ];
 
-fn error(reason: impl ToString) -> Error {
+pub(super) fn error(reason: impl ToString) -> Error {
     Error::Message(reason.to_string())
 }
 
@@ -46,7 +45,7 @@ fn python(config: &Value) -> Command {
     Command::new(executable)
 }
 
-fn exchange(config: &Value, request: Value) -> Result<Value> {
+pub(super) fn exchange(config: &Value, request: Value) -> Result<Value> {
     // The host can inspect metadata from background threads during a sync.
     static LINK: Mutex<()> = Mutex::new(());
     let _link = LINK
@@ -440,23 +439,8 @@ pub(crate) fn action(request: &Request, command: &str) -> Result<Reply> {
         return Ok(Reply::json(json!([true, message])));
     }
     if command == "micro_shell" && args.is_empty() {
-        let mut child = python(&config);
-        // Keep operator I/O on the CLI's terminal. The transport module lives only inside the library.
-        let script = format!("__name__ = 'micro_transport'\n{TRANSPORT}\n{SHELL}");
-        let result = child
-            .args(["-P", "-c", &script])
-            .env("MICRO_SHELL_CONNECTOR", config.to_string())
-            .env("MICRO_SHELL_LABEL", instance)
-            .status()
-            .map_err(error)?;
-        return Ok(Reply::json(json!([
-            result.success(),
-            if result.success() {
-                "Device shell closed."
-            } else {
-                "Device shell failed."
-            }
-        ])));
+        crate::device_shell::run(&config, &instance)?;
+        return Ok(Reply::json(json!([true, "Device shell closed."])));
     }
     if args.is_empty() {
         return Err(error(

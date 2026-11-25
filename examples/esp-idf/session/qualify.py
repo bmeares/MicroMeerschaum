@@ -43,7 +43,7 @@ async def run(args, directory):
     board = Board(0, link, args, directory)
     try:
         await board.boot()
-        await board.until(b"mm> ")
+        await board.until(b"[ journal:local ] > ")
         # Send UART bytes in FIFO-sized fragments, as a USB bridge does.
         async def wired(data):
             for i in range(0, len(data), 16):
@@ -52,7 +52,7 @@ async def run(args, directory):
                 await asyncio.sleep(0.02)
 
         await wired(b"show uptime\r")
-        assert b" ms" in await board.until(b"mm> ")
+        assert b" ms" in await board.until(b"[ journal:local ] > ")
         await wired(frame("usb", "catalog"))
         await board.until(b"@micro ")
         result = json.loads(await board.until(b"\n"))

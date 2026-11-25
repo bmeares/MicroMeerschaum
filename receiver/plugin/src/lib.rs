@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Authenticated Meerschaum batch routes and independent raw capture.
 mod device;
+mod device_shell;
 mod replay;
 mod store;
 

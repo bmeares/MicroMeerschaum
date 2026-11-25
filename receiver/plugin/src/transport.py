@@ -201,5 +201,7 @@ if __name__ == "__main__":
             report({"ok": True, "data": pending_write(config, request["key"], request["label"])})
         else:
             report({"ok": True, "data": exchange(config, request)})
+    except KeyboardInterrupt:
+        report({"ok": False, "error": "Interrupted. Any sent action or write has an unknown outcome. Inspect the device before retrying."})
     except Exception as failure:
         report({"ok": False, "error": str(failure)})

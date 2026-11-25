@@ -26,7 +26,7 @@ A trusted local prompt uses `mm_actions_local(&actions)`. For a remote caller, c
 
 The default maximum is 4224 input bytes and 32 parsed arguments after the matched name. Oversized lines, excess arguments, malformed quoting and embedded control bytes fail before invocation. Lines may contain spaces and tabs. Limits can be changed consistently across the core and its consumers at compile time. Allocate one workspace per overlapping dispatch. On small tasks, keep it in application storage. The prompt includes its own bounded input and decoding buffers and uses a caller-supplied reply buffer.
 
-For a byte-oriented port, initialize an `mm_action_shell` with its view, parsing mode, reply buffer, write callback and echo setting. Feed received bytes to `mm_action_shell_feed`. CR, LF or CRLF submits a line, Backspace and DEL erase a byte, Tab completes or lists visible names, and Ctrl-C cancels the current line. An overlong or invalid line is discarded through its terminator. The session ends on `exit`, Ctrl-D at an empty prompt, or a failed output callback. A serial driver retains ownership of its UART and connection state.
+For a byte-oriented port, initialize an `mm_action_shell` with its view, parsing mode, reply buffer, write callback and echo setting. Feed received bytes to `mm_action_shell_feed`. CR, LF or CRLF submits a line, Backspace and DEL erase a byte, Tab completes or lists visible names, and Ctrl-C cancels the current line. An overlong or invalid line is discarded through its terminator. The session displays `[ journal:local ] >` and ends on `exit`, `quit`, Ctrl-D at an empty prompt, or a failed output callback. A serial driver retains ownership of its UART and connection state.
 
 ## Publish configured Pipes
 

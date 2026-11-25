@@ -23,13 +23,13 @@ Use these results to choose an integration path and repeat the checks on your de
 | Native shell and session | The C/C++ tests exercised line editing, bounded replies, action permissions, source and push-only Pipes and a lost delivery receipt. An ESP-IDF 5.5.6 application served its human shell and framed catalog on one emulated UART, rejected unpaired writes and subscriptions, and completed bonded reads, actions and a partial-command disconnect over GATT. QEMU ran all three Arduino-ESP32 3.3.6 sketches from the release ZIP, including tab completion and `show uptime` on **ActionShell**. |
 | Hosted upgrade | HTTPS capture began using the v0.1.0 plugin. After its removal and configuration migration, the installed `micro` plugin received the missing earlier sequence, acknowledged both and replayed ordered rows. The suite ran with SQLite and PostgreSQL 18. An ESP32-S3 also uploaded two rows over emulated Wi-Fi and verified TLS to the new plugin. Receiver replay returned both rows. |
 
-To repeat the host Pipe acceptance test, install Meerschaum 5.1.5 or 5.1.6 and pyserial in your environment, with its `mrsm` on PATH. Download the matching firmware and ELF, decompress the ELF, then run from the release source. [Release downloads](https://github.com/bmeares/MicroMeerschaum/releases/tag/v0.2.0) · [Host installation](host-device.md)
+To repeat the host Pipe acceptance test, install Meerschaum 5.1.5 or 5.1.6 and pyserial in your environment, with its `mrsm` on PATH. Download the matching firmware and ELF, decompress the ELF, then run from the release source. [Release downloads](https://github.com/bmeares/MicroMeerschaum/releases/tag/v0.2.1) · [Host installation](host-device.md)
 
 ```sh
-xz -dk micromeerschaum-0.2.0-ESP32-S3.elf.xz
+xz -dk micromeerschaum-0.2.1-ESP32-S3.elf.xz
 cargo build --release --locked --manifest-path receiver/plugin/Cargo.toml
 python3 ports/micropython/tests/board_instance.py \
-  micromeerschaum-0.2.0-ESP32-S3.bin --elf micromeerschaum-0.2.0-ESP32-S3.elf \
+  micromeerschaum-0.2.1-ESP32-S3.bin --elf micromeerschaum-0.2.1-ESP32-S3.elf \
   --library receiver/plugin/target/release/libmicro.so
 ```
 
@@ -45,7 +45,7 @@ python3 -m venv /tmp/micro-ble
 sudo modprobe hci_vhci
 sudo systemctl start bluetooth
 sudo /tmp/micro-ble/bin/python ports/micropython/tests/board_host_ble.py \
-  micromeerschaum-0.2.0-ESP32-S3.bin --elf micromeerschaum-0.2.0-ESP32-S3.elf \
+  micromeerschaum-0.2.1-ESP32-S3.bin --elf micromeerschaum-0.2.1-ESP32-S3.elf \
   --efuse-tool esp-emulator/tools/make-efuse.py \
   --library receiver/plugin/target/release/libmicro.so --emulator "$(command -v esp-emu)"
 ```
@@ -54,7 +54,7 @@ The host and firmware perform passkey pairing and GATT operations with their own
 
 ## Repeat the two-board BLE test
 
-Run these commands at the repository root with Python 3.11 or newer and `esp-emu` v1.2.0 on your PATH. Download the board image and its matching compressed ELF from the release into the working directory. A local firmware build also works with its own application ELF. [Firmware and ELF](https://github.com/bmeares/MicroMeerschaum/releases/tag/v0.2.0) · [Espressif emulator v1.2.0](https://github.com/espressif/esp-emulator/releases/tag/v1.2.0)
+Run these commands at the repository root with Python 3.11 or newer and `esp-emu` v1.2.0 on your PATH. Download the board image and its matching compressed ELF from the release into the working directory. A local firmware build also works with its own application ELF. [Firmware and ELF](https://github.com/bmeares/MicroMeerschaum/releases/tag/v0.2.1) · [Espressif emulator v1.2.0](https://github.com/espressif/esp-emulator/releases/tag/v1.2.0)
 
 ```sh
 ble_test_dir=$(mktemp -d)
@@ -62,8 +62,8 @@ python3 -m venv "$ble_test_dir/venv"
 "$ble_test_dir/venv/bin/python" -m pip install bumble==0.0.236
 git clone --depth 1 --branch v1.2.0 https://github.com/espressif/esp-emulator.git "$ble_test_dir/esp-emulator"
 "$ble_test_dir/venv/bin/python" ports/micropython/tests/board_ble_pair.py \
-  micromeerschaum-0.2.0-ESP32-S3.bin \
-  --elf micromeerschaum-0.2.0-ESP32-S3.elf.xz \
+  micromeerschaum-0.2.1-ESP32-S3.bin \
+  --elf micromeerschaum-0.2.1-ESP32-S3.elf.xz \
   --efuse-tool "$ble_test_dir/esp-emulator/tools/make-efuse.py" \
   --artifacts "$ble_test_dir/results"
 ```

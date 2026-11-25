@@ -61,6 +61,22 @@ def until(serial, delimiter):
 def run_board(serial, previous):
     serial.sendall(b"\r")
     until(serial, b">>> ")
+    if not previous:
+        serial.sendall(b"from micromeerschaum import shell\r")
+        until(serial, b">>> ")
+        serial.sendall(b"shell()\r")
+        prompt = b"[ journal:local ] > "
+        until(serial, prompt)
+        serial.sendall(b"unknown")
+        until(serial, b"unknown")
+        serial.sendall(b"\x03")
+        until(serial, prompt)
+        serial.sendall(b"show ac\t")
+        until(serial, b"show actions ")
+        serial.sendall(b"\r")
+        assert b"help" in until(serial, prompt)
+        serial.sendall(b"quit\r")
+        until(serial, b">>> ")
     serial.sendall(b"\x01")
     until(serial, b"raw REPL; CTRL-B to exit\r\n>")
     script = f"""import _mmstorage, mm_https, mm_ble, aioble
