@@ -74,7 +74,7 @@ class Board:
         self.log = self.files.enter_context((workdir / (self.name + ".emu.log")).open("wb"))
         self.transcript = self.files.enter_context((workdir / (self.name + ".uart.log")).open("wb"))
 
-    async def start(self):
+    async def boot(self):
         self.transport = await open_transport(f"tcp-server:127.0.0.1:{self.hci}")
         self.controller = Controller(
             self.name,
@@ -138,6 +138,9 @@ class Board:
                 await asyncio.sleep(0.11)
         else:
             raise RuntimeError("no UART")
+
+    async def start(self):
+        await self.boot()
         self.write.write(b"\r")
         await self.until(b">>> ")
         self.write.write(b"\x01")

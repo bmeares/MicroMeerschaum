@@ -57,3 +57,17 @@ The sample firmware accepts management frames and human commands on the same USB
 ```
 
 For BLE, enable `CONFIG_MICROMEERSCHAUM_SESSION_GATT` and provide the enrolled peer's identity address and type in the example configuration. The example displays a fresh pairing passkey on the wired console. When attaching an existing NimBLE host, call `mm_session_gatt_register` during service registration and forward GAP subscription, security-change and disconnect events to `mm_session_gatt_event`. The enrollment callback receives the resolved identity in NimBLE's little-endian byte order. It must be safe to call from both the NimBLE host and the management worker. The client subscribes to TX notifications on an encrypted, authenticated and bonded link. The worker runs actions and storage operations off the NimBLE host stack. Each reply fragment runs through the host event queue to check the current enrollment, subscription and connection generation before transmission. The application owns advertising, pairing, storage serialization and the lifecycle of its NimBLE host. [Management service API](../core/include/micromeerschaum/session_gatt.h)
+
+### Reproduce the native transport test
+
+The native qualification harness boots the example's ESP32-S3 image under Espressif esp-emu v1.2.0. It uses Bumble 0.0.236 for a loopback central and two virtual controllers. Configure the example with the test central's public identity `24:0a:c4:02:00:02`, address type `0`, and the default USB-to-UART bridge. Build with ESP-IDF v5.5.6. From the example directory, assemble the image and run the harness with its matching ELF.
+
+```sh
+(cd build && python -m esptool --chip esp32s3 merge_bin -o ../firmware.bin @flash_args)
+python qualify.py firmware.bin --elf build/mm_session_example.elf \
+  --emulator /path/to/esp-emu --efuse-tool /path/to/esp-emulator/tools/make-efuse.py
+```
+
+The test executes a human command and a framed request on the same UART. It checks denial before pairing, enters the freshly displayed passkey, reads the published clock through fragmented notifications, and checks write denial. It leaves a partial command on the first connection, restores the bond and verifies that only a fresh request completes. The harness uses fresh scratch flash files for every run. [Native transport harness](../examples/esp-idf/session/qualify.py)
+
+To run the host session tests against the same cJSON implementation, add `-DMM_CJSON_DIR="$IDF_PATH/components/json/cJSON"` when configuring the host core, then run CTest.

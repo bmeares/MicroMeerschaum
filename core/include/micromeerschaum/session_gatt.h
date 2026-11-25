@@ -20,6 +20,8 @@ int mm_session_gatt_register(mm_device_session *, mm_session_peer_fn, void *user
 struct ble_gap_event;
 /* Forward the application's GAP events, including subscribe and disconnect. */
 void mm_session_gatt_event(const struct ble_gap_event *);
+/* Invalidate partial input and queued replies when enrollment is revoked. */
+void mm_session_gatt_revoke(uint16_t handle);
 
 #ifdef __cplusplus
 }
