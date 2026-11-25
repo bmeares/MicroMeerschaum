@@ -89,6 +89,10 @@ typedef struct { char decoded[MM_ACTION_MAX_LINE + 1u]; } mm_action_workspace;
 bool mm_actions_dispatch(const mm_action_view *, const char *line, size_t len,
                          mm_action_mode, mm_action_workspace *, mm_action_output *);
 
+/* The standard, view-filtered help formatter. A custom help handler may call
+ * it for a restricted view while preserving a local console's legacy reply. */
+bool mm_actions_help(const mm_action_call *, mm_action_output *);
+
 /* Visits each admitted descriptor once, in registration order. Completion
  * visits each matching full name or alias. The empty prefix matches all. */
 typedef void (*mm_action_visit_fn)(const mm_action *, void *);

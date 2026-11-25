@@ -14,4 +14,10 @@ menu "MicroMeerschaum"
         bool "Enable NimBLE peer transport"
         depends on BT_NIMBLE_ENABLED && BT_NIMBLE_ROLE_CENTRAL && BT_NIMBLE_ROLE_PERIPHERAL
         default n
+    config MICROMEERSCHAUM_DEVICE_SESSION
+        bool "Enable the line-framed device management session"
+        default n
+        help
+            Provide the bounded JSON session for explicitly admitted actions
+            and published Pipe registrations over application-owned transports.
 endmenu
