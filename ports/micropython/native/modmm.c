@@ -215,12 +215,19 @@ static mp_obj_t append(size_t n, const mp_obj_t *a) {
         }
         samples[i] = (mm_sample){MM_KIND_DATA, mono_us, boot, data.buf, (uint32_t)data.len};
     }
+    // Prepare the normal result while failures can still leave the input uncommitted.
+    mp_obj_t success_items[] = {MP_OBJ_NEW_QSTR(MP_QSTR_ok), MP_OBJ_NEW_SMALL_INT(count),
+        MP_OBJ_NEW_SMALL_INT(0), MP_OBJ_NEW_SMALL_INT(0)};
+    mp_obj_t success = mp_obj_new_tuple(4, success_items);
     uint64_t first = 0;
     mm_journal_status status = mm_journal_append_group(j, samples, count, &first);
+    if (status == MM_JOURNAL_OK) {
+        return success;
+    }
     bool uncertain = status == MM_JOURNAL_UNCERTAIN && first != 0;
     const char *name = mm_journal_status_name(status);
     mp_obj_t result[] = {mp_obj_new_str(name, strlen(name)),
-        mp_obj_new_int(status == MM_JOURNAL_OK ? count : 0),
+        MP_OBJ_NEW_SMALL_INT(0),
         mp_obj_new_int_from_ull(uncertain ? first : 0), mp_obj_new_int(uncertain ? count : 0)};
     return mp_obj_new_tuple(4, result);
 }
@@ -260,6 +267,28 @@ static mp_obj_t confirm(mp_obj_t self, mp_obj_t issuer, mp_obj_t receipt) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_3(confirm_obj, confirm);
 
+static mp_obj_t routes(mp_obj_t self) {
+    mm_journal *j = store(self);
+    if (mm_journal_needs_reopen(j)) {
+        check(MM_JOURNAL_UNCERTAIN);
+    }
+    size_t count = mm_journal_route_count(j);
+    mp_obj_t result = mp_obj_new_list(0, NULL);
+    for (size_t i = 0; i < count; ++i) {
+        mm_route_range route;
+        check(mm_journal_route_get(j, i, &route));
+        mp_obj_t hops[MM_BATCH_MAX_HOPS];
+        for (size_t k = 0; k < route.hop_count; ++k) {
+            hops[k] = mp_obj_new_int_from_ull(route.hops[k].node);
+        }
+        mp_obj_t entry[] = {mp_obj_new_int_from_ull(route.first), mp_obj_new_int_from_ull(route.last),
+            mp_obj_new_int_from_ull(route.sender), mp_obj_new_tuple(route.hop_count, hops)};
+        mp_obj_list_append(result, mp_obj_new_tuple(MP_ARRAY_SIZE(entry), entry));
+    }
+    return result;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(routes_obj, routes);
+
 static mp_obj_t read_record(mp_obj_t self, mp_obj_t seq_obj) {
     mm_journal *j = store(self);
     uint64_t seq = integer_bits(seq_obj, false);
@@ -288,6 +317,7 @@ static const mp_rom_map_elem_t methods[] = {
     {MP_ROM_QSTR(MP_QSTR_receive), MP_ROM_PTR(&receive_obj)},
     {MP_ROM_QSTR(MP_QSTR_confirm), MP_ROM_PTR(&confirm_obj)},
     {MP_ROM_QSTR(MP_QSTR_read_record), MP_ROM_PTR(&read_obj)},
+    {MP_ROM_QSTR(MP_QSTR_routes), MP_ROM_PTR(&routes_obj)},
     {MP_ROM_QSTR(MP_QSTR_reclaim), MP_ROM_PTR(&reclaim_obj)},
     {MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&close_obj)},
     {MP_ROM_QSTR(MP_QSTR___del__), MP_ROM_PTR(&close_obj)},

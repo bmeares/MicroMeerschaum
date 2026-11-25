@@ -245,8 +245,12 @@ class Pipe:
             after = store.progress()[2]
         return store.batch(after, max_records, cap)
 
-    def receive(self, authenticated_origin, batch):
-        return self._config().store.receive(authenticated_origin, batch)
+    def receive(self, authenticated_sender, batch):
+        return self._config().store.receive(authenticated_sender, batch)
+
+    def routes(self):
+        """Return (first, last, authenticated sender, reported hops) for each observed route."""
+        return self._config().store.routes()
 
     def confirm(self, authenticated_issuer, receipt):
         self._config().store.confirm(authenticated_issuer, receipt)

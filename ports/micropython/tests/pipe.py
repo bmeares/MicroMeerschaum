@@ -152,3 +152,22 @@ assert dest.read_doc(17)["tick"] == 101
 p.close()
 dest.close()
 print("provisioned API instance and durable receipt")
+
+a = provision("sensor", "relay", root + "/a.mm", 11, 6, 33, custodian=22, create=True)
+b = provision("sensor", "relay", root + "/b.mm", 11, 6, 33, receiver=True,
+              custodian=22, instance="journal:relay", create=True)
+c = provision("sensor", "relay", root + "/c.mm", 11, 6, 33, receiver=True,
+              instance="journal:final", create=True)
+assert a.sync({"volts": 3.3})[0]
+a.confirm(22, b.receive(11, a.batch()))
+assert a.progress()["confirmed"] == 1 and b.progress()["confirmed"] == 0
+assert b.routes() == [(1, 1, 11, ())]
+provision_peer("peer:final", 33, lambda packet: c.receive(22, packet))
+assert b.deliver("peer:final")[0]
+assert c.routes() == [(1, 1, 22, (22,))]
+assert c.read_record(1) == a.read_record(1)
+assert b.progress()["confirmed"] == 1
+a.close()
+b.close()
+c.close()
+print("custody transfer and authenticated route evidence")
