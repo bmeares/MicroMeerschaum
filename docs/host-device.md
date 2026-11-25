@@ -88,7 +88,15 @@ if rows:
 
 `device.id` and `device.attributes["parameters"]["micro"]` describe the live exposure. A read-only Pipe reports a sync lock. The device owns registration and permissions. The reserved Meerschaum connector key `mrsm` belongs to host metadata and is excluded from discovery. Hosts that record sync metrics on their instance may report a dropped metric after a device sync.
 
-Each write accepts up to 128 flat documents within one 4096-byte frame. The device applies its store's usual append or upsert semantics. The result describes the local write. A lost reply after sending an action or a write reports an unknown outcome. Inspect the device state before explicitly repeating the operation. Use ordinary `sync(rows)` for this workflow. Meerschaum's `force=True` asks its engine to repeat failed syncs.
+Each write accepts up to 128 flat documents within one 4096-byte frame. The device applies its store's usual append or upsert semantics. The result describes the local write. A lost reply after sending an action or a write reports an unknown outcome. Inspect device state before explicitly repeating an action.
+
+If a write loses its reply or the device reports an error, the host blocks further writes to that Pipe, including Meerschaum's automatic `force=True` retries. Device errors may report a partially committed group. The failure message preserves that detail and provides a recovery token. Reads and writes to other Pipes remain available. After checking the Pipe and deciding which rows still need syncing, acknowledge the specific incident. The command clears only that write guard and sends no rows.
+
+```sh
+mrsm micro reconcile RECOVERY_TOKEN -i micro:bench
+```
+
+The host shares write guards across processes running as the same user. Each guard identifies the serial device or the bonded BLE address, together with the Pipe keys. On Linux, the host uses the serial device's by-id name when available. Other serial devices use the resolved port path. Use the same transport and device address for reconciliation. With USB, configure a stable port so the address continues to identify the same device. Keep the host's state directory across restarts. It defaults to `~/.local/state/micromeerschaum/writes`, or `micromeerschaum/writes` under `XDG_STATE_HOME` or Windows `LOCALAPPDATA`. A local failure before transmission clears the guard automatically.
 
 Journal reads return the oldest retained documents. The device SQL store supports its configured half-open axis bounds and parameter filters. For example, `device.get_docs(begin=10, end=20, params={"station":"A"}, limit=4)` reads matching rows on a suitable SQL Pipe. Use a smaller limit or narrower supported bounds if the encoded result exceeds 4096 bytes. A full read succeeds only when the host can establish that every row fits. A result that fills all 128 slots requires an explicit limit or a narrower window.
 

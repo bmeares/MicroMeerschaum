@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ from pathlib import Path
 PLUGIN = Path(__file__).resolve().parents[1]
 DEFAULT_KEY = ["sensor", "readings", None]
 READ_ONLY = ["sensor", "readonly", "outside"]
+OTHER_KEY = ["sensor", "other", None]
 
 
 class Device:
@@ -26,6 +28,7 @@ class Device:
         self.port = os.ttyname(self.slave)
         self.rows = []
         self.writes = 0
+        self.other_rows = []
         self.actions = []
         self.running = True
         self.worker = threading.Thread(target=self.serve, daemon=True)
@@ -55,20 +58,28 @@ class Device:
                             key=key,
                             instance="journal:local",
                             read=True,
-                            write=i == 0,
+                            write=key != READ_ONLY,
                         )
-                        for i, key in enumerate((DEFAULT_KEY, READ_ONLY))
+                        for i, key in enumerate((DEFAULT_KEY, READ_ONLY, OTHER_KEY))
                     ]
                     offset = req.get("offset", 0)
                     # Exercise page continuation even when the host requested more entries.
-                    data = dict(items=items[offset : offset + 1], more=offset == 0)
+                    data = dict(
+                        items=items[offset : offset + 1], more=offset + 1 < len(items)
+                    )
                 elif req["op"] == "write":
                     self.writes += 1
-                    assert req["key"] == DEFAULT_KEY
-                    self.rows.extend(req["rows"])
-                    if req["rows"][0].get("simulate") == "drop":
-                        continue
-                    data = "Stored %d rows" % len(req["rows"])
+                    assert req["key"] in (DEFAULT_KEY, OTHER_KEY)
+                    rows = self.rows if req["key"] == DEFAULT_KEY else self.other_rows
+                    simulate = req["rows"][0].get("simulate")
+                    if simulate == "partial":
+                        rows.extend(req["rows"][:1])
+                        failure = "device storage error (confirmed 1 input row)"
+                    else:
+                        rows.extend(req["rows"])
+                        if simulate == "drop":
+                            continue
+                        data = "Stored %d rows" % len(req["rows"])
                 elif req["op"] == "read":
                     data = (
                         self.rows[: req["limit"]]
@@ -171,6 +182,7 @@ def qualify(root, library, transport_python):
         }
     }
     os.environ.update(
+        XDG_STATE_HOME=str(root / "state"),
         MRSM_ROOT_DIR=str(root),
         MRSM_PLUGINS_DIR=str(plugins),
         MRSM_NO_AUTO_INSTALL="1",
@@ -256,9 +268,13 @@ def qualify(root, library, transport_python):
             mrsm.Pipe(*DEFAULT_KEY, instance="sql:local").get_docs(limit=2) == rows
         ), report
 
-        before = device.writes
-        ok, msg = remote.sync([{"simulate": "drop"}])
-        assert not ok and "unknown" in msg.lower() and device.writes == before + 1, msg
+        guard_tests(
+            remote,
+            mrsm.Pipe(*OTHER_KEY, instance="micro:bench"),
+            device,
+            config,
+            transport_python,
+        )
         assert (
             command("micro", "action", "show", "pipes", "-i", "micro:bench").find(
                 "Ran show pipes"
@@ -286,10 +302,100 @@ def qualify(root, library, transport_python):
             "show pipes",
         ], device.actions
         print(
-            "Passed native discovery, filtered listing, SQL transfers, bounded reads, permissions, timeout and terminal shell."
+            "Passed native discovery, SQL transfers, bounded reads, permissions, shell, forced retries, concurrent writes and reconciliation."
         )
     finally:
         device.close()
+
+
+def guard_tests(remote, other, device, config, python):
+    def recovery_token(message):
+        match = re.search(r"mrsm micro reconcile ([0-9a-f.]+) ", message)
+        assert match, message
+        return match[1]
+
+    def reconcile(token):
+        return command("micro", "reconcile", token, "-i", "micro:bench")
+
+    before = device.writes
+    ok, msg = remote.sync([{"simulate": "drop"}], force=True, retries=3, min_seconds=0)
+    assert not ok and "Timed out" in msg and "unknown" in msg.lower(), msg
+    assert device.writes == before + 1
+    token = recovery_token(msg)
+    assert " -i micro:bench " in msg, msg
+    assert remote.get_docs(limit=10)[-1]["simulate"] == "drop"
+    assert other.sync([{"value": 73}])[0] and device.other_rows == [{"value": 73}]
+    assert "Reconciliation recorded" in reconcile(token)
+    assert remote.sync([{"value": 11}])[0]
+
+    before = device.writes
+    ok, msg = remote.sync(
+        [{"simulate": "partial"}, {"value": 2}], force=True, retries=2, min_seconds=0
+    )
+    assert not ok and "confirmed 1 input row" in msg and device.writes == before + 1, (
+        msg
+    )
+    assert "No matching" in command(
+        "micro", "reconcile", token, "-i", "micro:bench", ok=False
+    )
+    assert "Reconciliation recorded" in reconcile(recovery_token(msg))
+
+    # An oversized request fails locally and leaves the Pipe available.
+    ok, msg = remote.sync([{"value": "x" * 4096}])
+    assert not ok and "exceeds 4096" in msg, msg
+    assert remote.sync([{"value": 12}])[0]
+
+    # Isolate helper-process tests from Meerschaum's background metadata reads.
+    isolated = Device()
+    try:
+        settings = dict(
+            config["meerschaum"]["connectors"]["micro"]["bench"], port=isolated.port
+        )
+        helper_guard_tests(isolated, settings, python, recovery_token)
+    finally:
+        isolated.close()
+
+
+def helper_guard_tests(device, settings, python, recovery_token):
+    def helper(request):
+        child = subprocess.Popen(
+            [python, str(PLUGIN / "src/transport.py")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        child.stdin.write(json.dumps({"config": settings, "request": request}) + "\n")
+        child.stdin.flush()
+        return child
+
+    def reconcile(token):
+        output = helper({"op": "reconcile", "token": token}).communicate(timeout=10)[0]
+        assert json.loads(output)["ok"], output
+
+    # The second contender must see the first helper's incident and original error.
+    dropped = {"op": "write", "key": DEFAULT_KEY, "rows": [{"simulate": "drop"}]}
+    procs = [helper(dropped) for _ in range(2)]
+    reports = [
+        [json.loads(line) for line in proc.communicate(timeout=10)[0].splitlines()]
+        for proc in procs
+    ]
+    msgs = [r[-1]["error"] for r in reports]
+    assert msgs[0] == msgs[1] and device.writes == 1, msgs
+    reconcile(recovery_token(msgs[0]))
+
+    # Losing the parent before it receives the result leaves the incident pending.
+    write = {"op": "write", "key": DEFAULT_KEY, "rows": [{"value": 13}]}
+    proc = helper(write)
+    incident = recovery_token(json.loads(proc.stdout.readline())["pending"])
+    assert json.loads(proc.stdout.readline())["ok"]
+    proc.communicate(timeout=10)
+    result = json.loads(helper(write).communicate(timeout=10)[0])
+    assert (
+        not result["ok"]
+        and recovery_token(result["error"]) == incident
+        and device.writes == 2
+    )
+    reconcile(incident)
 
 
 def device_rows():
