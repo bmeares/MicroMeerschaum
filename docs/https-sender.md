@@ -22,3 +22,17 @@ mm_journal_status upload(mm_journal *origin, uint64_t receiver_id, const char *u
 ```
 
 The receipt confirms durable raw capture at the named destination. Each valid reply advances the persisted cursor. Losing a reply leaves the corresponding records available for retry on the next wake. A receiving node can acknowledge the accounted-for prefix even when sensor decoding is delayed. The configured buffer must fit at least the next complete record and its batch header. [Receipt format](../spec/protocol-v1.md#receipt)
+
+On the ESP32-S3 MicroPython image, configure Wi-Fi and a valid UTC clock before delivery. Open a session with the full ingest URL and a scoped API token. Supply a third argument with the PEM trust anchor for a private certificate authority. The session reuses its TLS connection across exchanges.
+
+```python
+import mm_https
+from micromeerschaum import provision_peer
+
+client = mm_https.open(url, token)
+try:
+    provision_peer("api:site", destination_id, client.exchange)
+    ok, message = pipe.copy_to("api:site")
+finally:
+    client.close()
+```
