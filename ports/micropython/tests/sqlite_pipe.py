@@ -34,3 +34,20 @@ assert len(p.get_docs()) == 3
 p.close()
 dst.close()
 print("persistent SQLite row corrections, filtered reads, delivery and replay")
+
+origin = provision("sensor", "pressure", sys.argv[1] + "/custody.db", 10, 5, 30,
+                   instance="sql:local", columns=(("tick", "int", True),), axis="tick",
+                   custodian=20, create=True)
+relay = provision("sensor", "pressure", sys.argv[1] + "/custody.mm", 10, 5, 30,
+                  instance="journal:relay", custodian=20, receiver=True, create=True)
+assert origin.sync({"tick": 3})[0]
+original = origin.read_record(1)
+packet = origin.batch()
+receipt = relay.receive(10, packet)
+assert packet == origin.batch()
+origin.confirm(20, relay.receive(10, packet))
+assert relay.read_record(1) == original
+assert origin.progress()["confirmed"] == 1 and relay.progress()["confirmed"] == 0
+assert origin.get_docs() == [{"tick": 3}]
+relay.close()
+origin.close()

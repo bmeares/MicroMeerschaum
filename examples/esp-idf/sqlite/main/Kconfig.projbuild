@@ -1,0 +1,11 @@
+menu "SQLite Pipe example"
+    config MM_SQLITE_EXAMPLE_PROVISION
+        bool "Provision a fresh demonstration database if missing"
+        default n
+    config MM_SQLITE_EXAMPLE_FAIL_SYNC
+        bool "Exercise a failed file synchronization before collection"
+        default n
+        help
+            The example returns EIO from the next fsync during an append,
+            closes the handle and checks the recovered Pipe before continuing.
+endmenu

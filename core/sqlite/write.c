@@ -6,6 +6,8 @@ typedef struct {
     mm_field key[MM_SQLITE_MAX_COLUMNS];
     int column[MM_SQLITE_MAX_COLUMNS];
     size_t count, keys;
+    bool have_utc;
+    int64_t utc;
 } write_row;
 
 static mm_journal_status prepare_row(mm_sqlite *db, const mm_sample *sample, write_row *row)
@@ -24,11 +26,13 @@ static mm_journal_status prepare_row(mm_sqlite *db, const mm_sample *sample, wri
     }
     size_t axis = db->def.axis;
     if (positions[axis] < 0 && db->def.autotime) {
-        int64_t utc;
-        if (!db->clock || !db->clock(db->clock_ctx, &utc)) return MM_JOURNAL_INVALID;
+        if (!row->have_utc) {
+            if (!db->clock || !db->clock(db->clock_ctx, &row->utc)) return MM_JOURNAL_INVALID;
+            row->have_utc = true;
+        }
         size_t pos = row->count++;
         row->fields[pos] = (mm_field){{db->names[axis], strlen(db->names[axis])},
-                                     {MM_VALUE_TIME, {.timestamp_us = utc}}};
+                                     {MM_VALUE_TIME, {.timestamp_us = row->utc}}};
         row->column[pos] = (int)axis;
         positions[axis] = (int)pos;
     }
@@ -135,7 +139,7 @@ mm_journal_status mm_sql_append(void *ctx, const mm_sample *samples, size_t coun
     write_row *row = NULL;
     if (st == MM_JOURNAL_OK) {
         *first = high+1;
-        row = malloc(sizeof *row);
+        row = calloc(1, sizeof *row);
         if (!row) st = MM_JOURNAL_NOMEM;
     }
     for (size_t i = 0; i < count && st == MM_JOURNAL_OK; ++i)

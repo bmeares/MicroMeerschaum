@@ -113,6 +113,46 @@ static void retry_and_confirm(void)
     mm_sqlite_close(store);
 }
 
+static bool step_clock(void *ctx, int64_t *utc)
+{
+    *utc = ++*(int64_t *)ctx;
+    return true;
+}
+
+static void generated_axis(void)
+{
+    const mm_sqlite_column time_columns[] = {{"event",MM_VALUE_TIME,true},{"value",MM_VALUE_INT,false}};
+    const mm_sqlite_definition def = {time_columns,2,0,true};
+    assert(open_pipe(&def)==MM_JOURNAL_OK);
+    mm_sqlite_query q = {.limit=2};
+    mm_value latest;
+    assert(mm_sqlite_get_sync_time(store,&q,&latest)==MM_JOURNAL_OK && latest.type==MM_VALUE_NULL);
+    const mm_field field={{"value",5},{MM_VALUE_INT,{.integer=13}}};
+    mm_row batch[]={{&field,1},{&field,1}};
+    assert(mm_pipe_sync_rows(&pipe_handle,batch,2,12,1).status==MM_JOURNAL_INVALID);
+    int64_t utc=100;
+    mm_sqlite_set_clock(store,step_clock,&utc);
+    assert(mm_pipe_sync_rows(&pipe_handle,batch,2,12,1).confirmed==2);
+    assert(mm_sqlite_get_sync_time(store,&q,&latest)==MM_JOURNAL_OK && latest.type==MM_VALUE_TIME &&
+           latest.as.timestamp_us==101);
+    mm_sqlite_close(store);
+    assert(open_pipe(NULL)==MM_JOURNAL_OK);
+    uint8_t data[128];
+    for (uint64_t seq=1;seq<=2;++seq) {
+        size_t n, used;
+        mm_record rec;
+        mm_field fields[2];
+        assert(mm_sqlite_read(store,seq,data,sizeof data,&n)==MM_JOURNAL_OK);
+        assert(mm_record_decode(data,n,&rec,&used)==MM_OK && rec.seq==seq);
+        assert(mm_document_decode(rec.payload,rec.len,fields,2,&n)==MM_OK && n==2 &&
+               fields[1].value.type==MM_VALUE_TIME && fields[1].value.as.timestamp_us==101);
+    }
+    mm_field explicit_time={{"event",5},{MM_VALUE_TIME,{.timestamp_us=102}}};
+    assert(mm_pipe_sync_rows(&pipe_handle,&(mm_row){&explicit_time,1},1,0,0).confirmed==1);
+    assert(mm_sqlite_get_sync_time(store,&q,&latest)==MM_JOURNAL_OK && latest.as.timestamp_us==102);
+    mm_sqlite_close(store);
+}
+
 int main(void)
 {
     char dir[] = "/tmp/mm-sqlite-XXXXXX";
@@ -130,5 +170,11 @@ int main(void)
     reference_rows();
     retry_and_confirm();
     unlink(path);
-    rmdir(dir);
+    char sidecar[280];
+    snprintf(sidecar,sizeof sidecar,"%s-journal",path);
+    unlink(sidecar);
+    generated_axis();
+    unlink(path);
+    unlink(sidecar);
+    assert(!rmdir(dir));
 }
