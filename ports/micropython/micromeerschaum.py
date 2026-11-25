@@ -294,8 +294,7 @@ class Pipe:
 
     def get_docs(self, begin=None, end=None, params=None, limit=100):
         """Return up to limit current SQLite rows in the half-open axis interval."""
-        encoded = self._config().store.docs(begin, end, params, limit)
-        return [_mm.decode(payload) for payload in encoded]
+        return self._config().store.docs(begin, end, params, limit)
 
     def get_sync_time(self, params=None):
         """Latest matching SQLite axis value, as integer ticks or Unix microseconds."""

@@ -3,6 +3,7 @@
 #include <sys/time.h>
 #include "py/runtime.h"
 #include "../native/integers.h"
+#include "../native/row.h"
 #include "micromeerschaum/sqlite.h"
 
 typedef struct {
@@ -240,12 +241,7 @@ static mp_obj_t docs(size_t n, const mp_obj_t *a) {
     mm_row row;
     mm_journal_status st;
     while ((st=mm_sqlite_next(ctx.cursor,&row)) == MM_JOURNAL_OK) {
-        size_t len;
-        if (mm_document_encode(NULL,0,row,&len) != MM_OK) check(MM_JOURNAL_TOO_SMALL);
-        vstr_t b;
-        vstr_init_len(&b,len);
-        if (mm_document_encode((uint8_t *)b.buf,len,row,&len) != MM_OK) check(MM_JOURNAL_CORRUPT);
-        mp_obj_list_append(rows,mp_obj_new_bytes_from_vstr(&b));
+        mp_obj_list_append(rows, mm_python_dict(row));
     }
     nlr_pop_jump_callback(true);
     if (st != MM_JOURNAL_NOT_FOUND) check(st);
