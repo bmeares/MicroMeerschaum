@@ -194,7 +194,11 @@ class Peripheral:
     def _check(self, connection):
         if connection is None or connection is not self.connection:
             raise OSError("unknown connection")
-        sender = _identity(connection, self.authorize)
+        try:
+            sender = _identity(connection, self.authorize)
+        except Exception:
+            self.session.reset()
+            raise
         if self.sender is not None and sender != self.sender:
             self.session.reset()
             raise OSError("link identity changed")

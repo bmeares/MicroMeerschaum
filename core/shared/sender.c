@@ -10,8 +10,10 @@ mm_journal_status mm_send_window(mm_journal *origin, uint64_t authenticated_issu
     *result = (mm_send_result){0};
     if (!origin || !exchange || !buf || !capacity) return MM_JOURNAL_INVALID;
     const mm_journal_config *config = mm_journal_config_get(origin);
-    if (config->mode != MM_JOURNAL_ORIGIN || config->role != MM_DESTINATION ||
-        config->issuer != authenticated_issuer) return MM_JOURNAL_INVALID;
+    bool relay = config->mode == MM_JOURNAL_RECEIVER && config->role == MM_CUSTODY;
+    if ((config->mode != MM_JOURNAL_ORIGIN && !relay) ||
+        (relay ? config->destination : config->issuer) != authenticated_issuer)
+        return MM_JOURNAL_INVALID;
     result->through = mm_journal_confirmed(origin);
     if (mm_journal_needs_reopen(origin)) return MM_JOURNAL_UNCERTAIN;
     const uint64_t high = mm_journal_high(origin);
