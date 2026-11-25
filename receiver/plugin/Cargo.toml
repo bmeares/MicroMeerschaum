@@ -1,0 +1,26 @@
+[package]
+name = "mm_receiver"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Meerschaum receiver for MicroMeerschaum device streams"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+meerschaum-plugin = "=5.1.5"
+micromeerschaum = { path = ".." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9.1", default-features = false, features = ["any", "postgres", "sqlite", "runtime-tokio", "tls-rustls-ring-webpki"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+[profile.release]
+strip = true
