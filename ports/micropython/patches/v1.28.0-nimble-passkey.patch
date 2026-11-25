@@ -1,6 +1,6 @@
 --- a/extmod/nimble/modbluetooth_nimble.c
 +++ b/extmod/nimble/modbluetooth_nimble.c
-@@ -419,6 +419,16 @@
+@@ -419,11 +419,21 @@
              return 0;
          }
 
@@ -17,7 +17,29 @@
          case BLE_GAP_EVENT_ENC_CHANGE: {
              DEBUG_printf("commmon_gap_event_cb: enc change: status=%d\n", event->enc_change.status);
              #if MICROPY_PY_BLUETOOTH_ENABLE_PAIRING_BONDING
-@@ -495,16 +505,6 @@
+             if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
+-                mp_bluetooth_gatts_on_encryption_update(event->conn_update.conn_handle,
++                mp_bluetooth_gatts_on_encryption_update(event->enc_change.conn_handle,
+                     desc.sec_state.encrypted, desc.sec_state.authenticated,
+                     desc.sec_state.bonded, desc.sec_state.key_size);
+             }
+@@ -453,6 +463,15 @@
+                 ble_gap_conn_find(event->connect.conn_handle, &desc);
+                 reverse_addr_byte_order(addr, desc.peer_id_addr.val);
+                 mp_bluetooth_gap_on_connected_disconnected(MP_BLUETOOTH_IRQ_CENTRAL_CONNECT, event->connect.conn_handle, desc.peer_id_addr.type, addr);
++                #if MICROPY_PY_BLUETOOTH_ENABLE_PAIRING_BONDING
++                // A bonded central may restore encryption before NimBLE reports CONNECT.
++                // Publish the live link status now that aioble has registered this handle.
++                if (ble_gap_conn_find(event->connect.conn_handle, &desc) == 0 && desc.sec_state.encrypted) {
++                    mp_bluetooth_gatts_on_encryption_update(event->connect.conn_handle,
++                        desc.sec_state.encrypted, desc.sec_state.authenticated,
++                        desc.sec_state.bonded, desc.sec_state.key_size);
++                }
++                #endif
+             } else {
+                 // Connection failed.
+                 mp_bluetooth_gap_on_connected_disconnected(MP_BLUETOOTH_IRQ_CENTRAL_DISCONNECT, event->connect.conn_handle, 0xff, addr);
+@@ -495,16 +514,6 @@
 
              // Allow re-pairing.
              return BLE_GAP_REPEAT_PAIRING_RETRY;
