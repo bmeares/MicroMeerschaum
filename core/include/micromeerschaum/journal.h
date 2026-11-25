@@ -108,10 +108,10 @@ mm_journal_status mm_journal_read(mm_journal *j, uint64_t seq, uint8_t *out,
 mm_journal_status mm_journal_next(mm_journal *j, uint64_t from, uint64_t *seq);
 /* Select an original or the retained declaration accounting for a gap. */
 mm_journal_status mm_journal_delivery_start(mm_journal *j, uint64_t from, uint64_t *seq);
-/* Caller authenticates the issuer. Persist only a matching origin stream and
- * obligation, bounded by the highest locally allocated sequence. */
+/* Caller authenticates the issuer. Origins verify the provisioned receipt.
+ * Custodians verify the final destination and release up to their local prefix. */
 mm_journal_status mm_journal_confirm(mm_journal *j, const mm_receipt *receipt);
-/* Remove fully confirmed origin segments. Receivers retain their records. */
+/* Remove fully confirmed origin or custody segments. Destinations retain original records. */
 mm_journal_status mm_journal_reclaim(mm_journal *j);
 
 /* Tests may substitute a barrier that calls fsync(fd) or returns an error. */
