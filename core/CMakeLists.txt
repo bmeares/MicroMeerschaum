@@ -12,7 +12,7 @@ if(MM_SANITIZE)
 endif()
 
 add_library(micromeerschaum src/crc32.c src/wire.c src/record.c src/segment.c src/batch.c
-            src/protocol.c src/document.c src/pipe.c src/gatt.c)
+            src/protocol.c src/document.c src/pipe.c src/gatt.c src/actions.c src/action_shell.c)
 target_include_directories(micromeerschaum PUBLIC include)
 target_compile_options(micromeerschaum PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Werror)
 if(MM_SANITIZE)
@@ -20,7 +20,7 @@ if(MM_SANITIZE)
 endif()
 
 enable_testing()
-foreach(test vectors roundtrip protocol document gatt)
+foreach(test vectors roundtrip protocol document gatt actions)
     add_executable(test_${test} tests/test_${test}.c)
     target_link_libraries(test_${test} PRIVATE micromeerschaum)
     target_compile_options(test_${test} PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -57,6 +57,10 @@ if(UNIX)
     add_executable(mm_gatt_test_node tests/gatt_node.c)
     target_link_libraries(mm_gatt_test_node PRIVATE micromeerschaum_posix)
     target_compile_options(mm_gatt_test_node PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+    add_executable(mm_action_shell ../examples/host/actions.c)
+    target_link_libraries(mm_action_shell PRIVATE micromeerschaum)
+    target_compile_options(mm_action_shell PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
     add_executable(mm_sync_example ../examples/host/sync.c)
     target_link_libraries(mm_sync_example PRIVATE micromeerschaum_posix)
