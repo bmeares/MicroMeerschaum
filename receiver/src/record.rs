@@ -5,7 +5,7 @@ use crate::{Error, MAX_PAYLOAD, RECORD_HEADER_LEN, WIRE_VERSION, crc32, need, u3
 pub enum Kind {
     /// One document of the device pipe, such as a raw sensor frame.
     Data = 0,
-    /// UTF-8 JSON describing data the device knows it lost.
+    /// Loss evidence. v0 carries UTF-8 JSON; v1 uses [`crate::protocol::Loss`].
     Loss = 1,
 }
 

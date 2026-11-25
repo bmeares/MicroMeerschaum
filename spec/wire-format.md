@@ -3,13 +3,19 @@
 Status: **draft, version 0.** Nothing here is stable. Version 1 is frozen when
 the first deployment survives its site soak.
 
+New peer exchanges use the [draft v1 protocol](protocol-v1.md). Its saved
+identity, batch and receipt carry a stream generation. The v0 record frame
+remains usable inside that exchange. Typed v1 loss payloads are specified there.
+
 ## Model
 
 - **Device pipe.** A journal on a device, keyed like a Meerschaum pipe
   (connector, metric, location). Its axis is a monotonic sequence number.
-- **Sync.** A sender transfers a cursor range of one device pipe. The receiver
+- **Wire sync.** A sender transfers a cursor range of one device pipe. The receiver
   answers with the sequence through which that pipe is durable. Every hop uses
-  the same exchange: BLE peer, Wi-Fi gateway or HTTPS API.
+  the same exchange: BLE peer, Wi-Fi gateway or HTTPS API. A locally bound
+  MicroPython `Pipe.sync(df)` is a proposed write to local storage and can
+  complete before this exchange. [Device sync conventions](../docs/peer-sync.md#what-a-pipe-user-needs-to-know)
 - **Lineage.** Each batch carries its origin, its sequence range and a hop list
   (node, receive time, transport).
 - **Materialization.** A receiver turns device pipes into ordinary Meerschaum
@@ -81,7 +87,7 @@ consecutive seq. N may be 0. The batch is exactly the header and the N records.
 | 4 | 1 | version: 0 |
 | 5 | 1 | hop count H (0 to 8) |
 | 6 | 2 | reserved |
-| 8 | 8 | origin device id (u64; Walter uses its 48-bit MAC) |
+| 8 | 8 | origin node ID (u64) |
 | 16 | 4 | key length K (u32, 1 to 200) |
 | 20 | K | device pipe key |
 | 20+K | 24·H | hops, oldest first |

@@ -1,0 +1,9 @@
+# Supply a built-in document materializer
+
+The first release will accept tabular data through `pipe.sync(df)` and `pipe.sync(df=...)`. A list of row dictionaries and a dictionary of equal-length column lists describe the same ordered rows. A flat dictionary is a convenience for one row. Support a DataFrame object on runtimes with a compatible frame adapter. The MicroPython path uses built-in containers and bounded batches. The built-in materializer maps each document to a configured ordinary Meerschaum Pipe. A compact application-specific binary payload can use its own materializer.
+
+For example, `[{"tick": 1, "celsius": 21.4}, {"tick": 2, "celsius": 21.7}]` and `{"tick": [1, 2], "celsius": [21.4, 21.7]}` must produce the same two observations in the same order. Each gets its own immutable identity. Check column lengths before appending. Empty row or column batches supply zero observations. Omitting the argument requests a fetch from a configured source. A push-only Pipe needs supplied data. Iterate by row or bounded chunk so a column-oriented input does not require a second full frame in RAM. If a write stops between committed chunks, report the committed input prefix so the caller can resume.
+
+This gives Meerschaum users a working sensor-to-row path using familiar pipe keys and row fields. It also commits the project to specifying a small document profile and testing its interpretation across the device binding and receiver.
+
+The built-in materializer applies changes to a given row in source sequence order within each generation. Raw capture may accept a later correction first. Replaying the backlog must produce the same row as uninterrupted, ordered delivery, including after a crash between an output write and the materializer’s checkpoint. Append-only outputs need a stable key derived from the input identity to make that replay idempotent. [Correction and replay example](../meerschaum-design.md#copying-rows-and-forwarding-records)

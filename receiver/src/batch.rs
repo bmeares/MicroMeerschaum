@@ -4,7 +4,7 @@ use crate::{
     u64_at,
 };
 
-const HOP_LEN: usize = 24;
+pub(crate) const HOP_LEN: usize = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
@@ -36,9 +36,35 @@ pub struct Hop {
     pub transport: Transport,
 }
 
+pub(crate) fn decode_hops(buf: &[u8]) -> Result<Vec<Hop>, Error> {
+    let (hops, rest) = buf.as_chunks::<HOP_LEN>();
+    debug_assert!(rest.is_empty());
+    hops.iter()
+        .map(|hop| {
+            let transport = Transport::from_byte(hop[16]).ok_or(Error::BadField)?;
+            if hop[17..] != [0; 7] {
+                return Err(Error::BadField);
+            }
+            Ok(Hop {
+                node: u64_at(hop, 0),
+                received_us: i64::from_le_bytes(bytes(hop, 8)),
+                transport,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn encode_hops(hops: &[Hop], out: &mut Vec<u8>) {
+    for hop in hops {
+        out.extend_from_slice(&hop.node.to_le_bytes());
+        out.extend_from_slice(&hop.received_us.to_le_bytes());
+        out.extend_from_slice(&[hop.transport as u8, 0, 0, 0, 0, 0, 0, 0]);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchHeader<'a> {
-    /// Origin device id (Walter uses its 48-bit MAC).
+    /// ID of the node that originated the records.
     pub origin: u64,
     pub key: &'a str,
     /// Oldest first.
@@ -71,22 +97,7 @@ impl<'a> BatchHeader<'a> {
             return Err(Error::BadCrc);
         }
         let key = check_key(&buf[20..20 + key_len])?;
-        let hops = buf[20 + key_len..size - 8]
-            .as_chunks::<HOP_LEN>()
-            .0
-            .iter()
-            .map(|hop| {
-                let transport = Transport::from_byte(hop[16]).ok_or(Error::BadField)?;
-                if hop[17..] != [0; 7] {
-                    return Err(Error::BadField);
-                }
-                Ok(Hop {
-                    node: u64_at(hop, 0),
-                    received_us: i64::from_le_bytes(bytes(hop, 8)),
-                    transport,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let hops = decode_hops(&buf[20 + key_len..size - 8])?;
         let header = BatchHeader {
             origin: u64_at(buf, 8),
             key,
@@ -108,11 +119,7 @@ impl<'a> BatchHeader<'a> {
         out.extend_from_slice(&self.origin.to_le_bytes());
         out.extend_from_slice(&(self.key.len() as u32).to_le_bytes());
         out.extend_from_slice(self.key.as_bytes());
-        for hop in &self.hops {
-            out.extend_from_slice(&hop.node.to_le_bytes());
-            out.extend_from_slice(&hop.received_us.to_le_bytes());
-            out.extend_from_slice(&[hop.transport as u8, 0, 0, 0, 0, 0, 0, 0]);
-        }
+        encode_hops(&self.hops, out);
         out.extend_from_slice(&self.count.to_le_bytes());
         let crc = crc32(0, &out[start..]);
         out.extend_from_slice(&crc.to_le_bytes());
@@ -130,22 +137,8 @@ pub struct Batch<'a> {
 impl<'a> Batch<'a> {
     /// Validates a whole batch buffer.
     pub fn decode(buf: &'a [u8]) -> Result<Self, Error> {
-        let (header, mut offset) = BatchHeader::decode(buf)?;
-        let mut records: Vec<Record<'a>> = Vec::new();
-        for _ in 0..header.count {
-            let (record, used) = Record::decode(&buf[offset..])?;
-            if records
-                .last()
-                .is_some_and(|last| record.seq != last.seq.wrapping_add(1))
-            {
-                return Err(Error::SeqGap);
-            }
-            records.push(record);
-            offset += used;
-        }
-        if offset != buf.len() {
-            return Err(Error::Trailing);
-        }
+        let (header, offset) = BatchHeader::decode(buf)?;
+        let records = decode_records(&buf[offset..], header.count, |_| Ok(()))?;
         Ok(Batch { header, records })
     }
 
@@ -153,4 +146,29 @@ impl<'a> Batch<'a> {
     pub fn seq_range(&self) -> Option<(u64, u64)> {
         Some((self.records.first()?.seq, self.records.last()?.seq))
     }
+}
+
+/// Decode exactly `count` consecutive records and check version-specific payloads.
+pub(crate) fn decode_records<'a>(
+    mut buf: &'a [u8],
+    count: u32,
+    check: impl Fn(&Record<'_>) -> Result<(), Error>,
+) -> Result<Vec<Record<'a>>, Error> {
+    let mut records: Vec<Record<'a>> = Vec::new();
+    for _ in 0..count {
+        let (record, used) = Record::decode(buf)?;
+        if records
+            .last()
+            .is_some_and(|prior| prior.seq.checked_add(1) != Some(record.seq))
+        {
+            return Err(Error::SeqGap);
+        }
+        check(&record)?;
+        records.push(record);
+        buf = &buf[used..];
+    }
+    if !buf.is_empty() {
+        return Err(Error::Trailing);
+    }
+    Ok(records)
 }
