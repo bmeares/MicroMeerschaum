@@ -62,3 +62,36 @@ assert wide.sync({"tick": 1, "left": left})[0]
 assert wide.sync({"tick": 1, "right": right})[0]
 assert wide.get_docs(limit=1) == [{"tick": 1, "left": left, "right": right}]
 wide.close()
+
+# Host queries use the current SQLite rows, preserve typed timestamps, and
+# release the cursor on size or validation failures.
+import json
+from micromeerschaum import ActionRegistry
+from mm_session import DeviceSession, PREFIX
+
+registry = ActionRegistry()
+rows = provision("sensor", "events", sys.argv[1] + "/remote.db", 1, 9, 2, instance="sql:local",
+                 columns=(("dt", "datetime", False), ("station", "string", True),
+                          ("value", "int", False)), axis="dt", create=True)
+registry.expose(rows, read=True, write=True)
+session = DeviceSession(registry, ("catalog", "read", "write"))
+key = ["sensor", "events", None]
+
+
+def rpc(op, **kw):
+    req = {"v": 1, "id": "db", "op": op}
+    req.update(kw)
+    response = session.handle(PREFIX + json.dumps(req).encode())
+    return json.loads(response[len(PREFIX):])
+
+
+assert rpc("catalog")["data"]["items"][0]["filters"] == ["begin", "end", "params"]
+data = [{"dt": {"$us": us}, "station": "A", "value": us * 2} for us in range(4)]
+assert rpc("write", key=key, rows=data)["ok"]
+data[1]["value"] = 91
+assert rpc("write", key=key, rows=[data[1]])["ok"]
+assert rpc("read", key=key, limit=2, begin={"$us": 1}, end={"$us": 3},
+           params={"station": ["A", "B"]})["data"] == data[1:3]
+assert not rpc("read", key=key, limit=2, params={"bad": 1})["ok"]
+rows.close()
+print("remote SQLite catalog, typed time queries, keyed corrections and filter failures")
