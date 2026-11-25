@@ -1992,8 +1992,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "mm_receiver"
-version = "0.1.0"
+name = "micro"
+version = "0.2.0"
 dependencies = [
  "futures",
  "meerschaum-plugin",

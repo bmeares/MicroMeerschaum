@@ -220,7 +220,7 @@ def qualify(root, library, db, micropython=None):
         if k.startswith("MRSM_"):
             del os.environ[k]
     plugins = root / "plugins"
-    package = plugins / "mm_receiver"
+    package = plugins / "micro"
     package.mkdir(parents=True)
     shutil.copy2(library, package / library.name)
     shutil.copy2(PLUGIN / "plugin.toml", package)
@@ -245,7 +245,7 @@ def qualify(root, library, db, micropython=None):
     import meerschaum as mrsm
     from meerschaum.core import Token, User
 
-    assert mrsm.__version__ == "5.1.5"
+    assert mrsm.__version__ in ("5.1.5", "5.1.6")
     conn = mrsm.get_connector("sql:mmtest")
     user = User(
         "device",

@@ -1,6 +1,6 @@
+use micro::Receiver;
 use micromeerschaum::protocol::{Batch, Receipt, Stream};
 use micromeerschaum::{Kind, Record};
-use mm_receiver::Receiver;
 use serde_json::json;
 
 #[test]
