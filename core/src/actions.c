@@ -178,7 +178,10 @@ static const char *arguments(mm_action_call *call, mm_action_mode mode, char *bu
     size_t p = 0;
     const char *s = call->raw_tail;
     while (p < call->tail_len) {
-        if (call->argc == MM_ACTION_MAX_ARGS) return "Too many arguments.";
+        if (call->argc == MM_ACTION_MAX_ARGS) {
+            if (mode == MM_ACTION_LITERAL_PREFIX) break;
+            return "Too many arguments.";
+        }
         argv[call->argc++] = buf;
         char quote = 0;
         while (p < call->tail_len && (quote || !space(s[p]))) {
@@ -214,7 +217,7 @@ bool mm_actions_dispatch(const mm_action_view *view, const char *line, size_t le
     out->truncated = out->failed = false;
     if (out->capacity) out->data[0] = '\0';
     if (!view || !view->registry || !work || !valid_line(line, len) ||
-        (mode != MM_ACTION_QUOTED && mode != MM_ACTION_LITERAL))
+        (mode != MM_ACTION_QUOTED && mode != MM_ACTION_LITERAL && mode != MM_ACTION_LITERAL_PREFIX))
         return error(out, "Invalid action line.");
     size_t start = 0;
     while (start < len && space(line[start])) start++;

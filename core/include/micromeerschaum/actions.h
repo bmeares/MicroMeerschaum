@@ -75,7 +75,8 @@ bool mm_action_flush(mm_action_output *);
 
 typedef enum {
     MM_ACTION_QUOTED,          /* single/double quotes and backslash escapes */
-    MM_ACTION_LITERAL          /* split on space/tab, preserve every other byte */
+    MM_ACTION_LITERAL,         /* split on space/tab, preserve every other byte */
+    MM_ACTION_LITERAL_PREFIX   /* same, expose at most MAX_ARGS; raw tail is complete */
 } mm_action_mode;
 
 /* One scratch buffer per overlapping dispatch. A static workspace suits a
