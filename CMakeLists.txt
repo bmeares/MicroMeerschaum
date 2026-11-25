@@ -8,10 +8,14 @@ idf_component_register(
          "core/src/protocol.c" "core/src/document.c" "core/src/pipe.c" "core/src/gatt.c"
          "core/storage/journal.c" "core/storage/volume.c" "core/posix/peer.c" "core/shared/sender.c"
     INCLUDE_DIRS "core/include"
-    PRIV_REQUIRES esp_http_client mbedtls
+    PRIV_REQUIRES esp_http_client mbedtls bt
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
 
 if(CONFIG_MICROMEERSCHAUM_HTTPS)
     target_sources(${COMPONENT_LIB} PRIVATE "ports/esp-idf/https.c")
+endif()
+
+if(CONFIG_MICROMEERSCHAUM_NIMBLE)
+    target_sources(${COMPONENT_LIB} PRIVATE "ports/esp-idf/nimble.c")
 endif()
