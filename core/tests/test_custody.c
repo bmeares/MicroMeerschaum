@@ -59,6 +59,18 @@ int main(void)
     CHECK(mm_peer_confirm(origin, 2, stale, stale_len) == MM_JOURNAL_OK);
     CHECK(mm_journal_confirmed(origin) == 3 && mm_journal_confirmed(relay) == 0);
     CHECK(mm_journal_reclaim(origin) == MM_JOURNAL_OK);
+    /* Save a replay for after release, and a direct route to the final node. */
+    uint8_t retry[512], direct[512];
+    size_t retry_len, direct_len;
+    CHECK(mm_peer_batch(relay, 0, 3, retry, sizeof retry, &retry_len) == MM_JOURNAL_OK);
+    mm_v1_batch found;
+    size_t h;
+    uint64_t first, last;
+    CHECK(mm_v1_batch_validate(retry, retry_len, &found, &h, &first, &last) == MM_OK);
+    found.hop_count = 0; /* Same originals arrive via another authenticated link. */
+    direct_len = mm_v1_batch_header(direct, sizeof direct, &found);
+    memcpy(direct + direct_len, retry + h, retry_len - h);
+    direct_len += retry_len - h;
     mm_journal_close(origin);
     CHECK(unlink(a) == 0); /* The destination has never met the origin. */
     mm_journal_close(relay);
@@ -78,6 +90,19 @@ int main(void)
     CHECK(mm_journal_read(relay, 3, result, sizeof result, &n) == MM_JOURNAL_NOT_FOUND);
     CHECK(mm_journal_read(dest, 3, result, sizeof result, &n) == MM_JOURNAL_OK);
     CHECK(n == sizeof original && !memcmp(result, original, n));
+    CHECK(mm_peer_receive(relay, 1, direct, direct_len, reply, sizeof reply, &n) == MM_JOURNAL_OK);
+    CHECK(mm_journal_read(relay, 3, result, sizeof result, &n) == MM_JOURNAL_NOT_FOUND);
+    CHECK(mm_peer_receive(dest, 1, direct, direct_len, reply, sizeof reply, &n) == MM_JOURNAL_OK);
+    mm_journal_close(dest);
+    dest = open_node(d, MM_JOURNAL_RECEIVER, MM_DESTINATION, 9, false);
+    CHECK(mm_journal_route_count(dest) == 2);
+    for (size_t i = 0; i < 2; ++i) {
+        mm_route_range r;
+        CHECK(mm_journal_route_get(dest, i, &r) == MM_JOURNAL_OK);
+        CHECK(r.first == 1 && r.last == 3);
+        CHECK(i ? (r.sender == 1 && !r.hop_count) :
+                  (r.sender == 2 && r.hop_count == 1 && r.hops[0].node == 2));
+    }
     mm_journal_close(relay);
     mm_journal_close(dest);
     CHECK(unlink(b) == 0 && unlink(d) == 0 && rmdir(dir) == 0);

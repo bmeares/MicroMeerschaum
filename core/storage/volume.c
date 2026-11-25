@@ -17,7 +17,9 @@
 
 /* Separate sectors for alternate commit pages. Active slots are never
  * overwritten during a transaction. Slot data is an ordinary MM segment. */
-#define PAGE_SIZE 2048u
+#define LEGACY_CHECKSUM 2044u
+#define ROUTE_START 2052u
+#define PAGE_SIZE 4096u
 #define PAGE_STRIDE 4096u
 #define ENTRY_START 384u
 #define ENTRY_SIZE 20u
@@ -30,7 +32,7 @@ struct mm_volume {
     int fd;
     mm_volume_options opt;
     unsigned page;
-    bool repair;
+    bool repair, routes_dirty;
     uint8_t manifest[PAGE_SIZE];
     mm_journal_barrier barrier;
     void *context;
@@ -119,20 +121,25 @@ static mm_journal_status checkpoint(mm_volume *v)
     /* Once modifications to the RAM manifest start, any error requires reopen. */
     if (epoch == UINT64_MAX) return MM_JOURNAL_UNCERTAIN;
     mm_put64(v->manifest + 8, epoch + 1);
-    mm_put32(v->manifest + CHECKSUM, mm_crc32(0, v->manifest, CHECKSUM));
+    size_t crc_at = v->manifest[4] == 1 ? LEGACY_CHECKSUM : CHECKSUM;
+    mm_put32(v->manifest + crc_at, mm_crc32(0, v->manifest, crc_at));
     v->page ^= 1u;
     mm_journal_status st = write_page(v, v->page);
     if (st != MM_JOURNAL_OK) return st;
     /* A completed commit has two copies of its latest allocator state. A
      * single corrupt page cannot roll the stream back to an old sequence. */
     v->repair = true;
+    v->routes_dirty = false;
     return mm_volume_repair(v);
 }
 
 static bool valid_page(const uint8_t *p)
 {
-    return !memcmp(p, "MMJV\1\0\0\0", 8) && mm_get64(p + 8) != 0 &&
-           mm_get32(p + CHECKSUM) == mm_crc32(0, p, CHECKSUM);
+    if (memcmp(p, "MMJV", 4) || (p[4] != 1 && p[4] != 2) || p[5] || p[6] || p[7] ||
+        !mm_get64(p + 8)) return false;
+    size_t crc_at = p[4] == 1 ? LEGACY_CHECKSUM : CHECKSUM;
+    return mm_get32(p + crc_at) == mm_crc32(0, p, crc_at) &&
+           (p[4] == 1 || mm_get32(p + ROUTE_START - 4) <= MM_ROUTE_BYTES);
 }
 static mm_journal_status restore(mm_volume *v)
 {
@@ -290,6 +297,25 @@ segment mm_volume_segment(const mm_volume *v, size_t ordinal)
     }
     return (segment){{0, 0}, 0};
 }
+const uint8_t *mm_volume_routes(mm_volume *v, size_t *len)
+{
+    *len = v->manifest[4] == 1 ? 0 : mm_get32(v->manifest + ROUTE_START - 4);
+    return v->manifest + ROUTE_START;
+}
+
+void mm_volume_stage_routes(mm_volume *v, const uint8_t *data, size_t len)
+{
+    v->manifest[4] = 2;
+    memcpy(v->manifest + ROUTE_START, data, len);
+    mm_put32(v->manifest + ROUTE_START - 4, (uint32_t)len);
+    v->routes_dirty = true;
+}
+
+mm_journal_status mm_volume_commit_routes(mm_volume *v)
+{
+    return v->routes_dirty ? checkpoint(v) : MM_JOURNAL_OK;
+}
+
 mm_journal_status mm_volume_state(mm_volume *v, uint8_t **out, size_t *size)
 {
     *size = mm_get32(v->manifest + 28);
