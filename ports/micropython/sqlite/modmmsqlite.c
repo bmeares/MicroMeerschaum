@@ -230,7 +230,7 @@ static void close_cursor(void *ctx) {
 }
 
 static mp_obj_t docs(size_t n, const mp_obj_t *a) {
-    (void)n;
+    size_t budget = n == 6 ? bounded(a[5], UINT32_MAX) : SIZE_MAX;
     mm_sqlite *db=store(a[0]);
     query_state *q=query(db,a[1],a[2],a[3]);
     q->q.limit=bounded(a[4],MM_SQLITE_MAX_LIMIT);
@@ -241,13 +241,23 @@ static mp_obj_t docs(size_t n, const mp_obj_t *a) {
     mm_row row;
     mm_journal_status st;
     while ((st=mm_sqlite_next(ctx.cursor,&row)) == MM_JOURNAL_OK) {
+        /* Bound heap use before copying text from the cursor into Python.
+         * The service also checks the exact encoded JSON frame length. */
+        size_t bytes = 2;
+        for (size_t i = 0; i < row.count; ++i) {
+            bytes += row.fields[i].name.len + 4;
+            if (row.fields[i].value.type == MM_VALUE_TEXT)
+                bytes += row.fields[i].value.as.text.len;
+        }
+        if (bytes > budget) mp_raise_ValueError(MP_ERROR_TEXT("rows exceed read budget"));
+        budget -= bytes;
         mp_obj_list_append(rows, mm_python_dict(row));
     }
     nlr_pop_jump_callback(true);
     if (st != MM_JOURNAL_NOT_FOUND) check(st);
     return rows;
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(docs_obj,5,5,docs);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(docs_obj,5,6,docs);
 
 static mp_obj_t sync_time(size_t n, const mp_obj_t *a) {
     mm_sqlite *db=store(a[0]);
