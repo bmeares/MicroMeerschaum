@@ -46,11 +46,12 @@ static bool utc_clock(void *ctx, int64_t *out) {
 }
 
 static mp_obj_t db_open(size_t n, const mp_obj_t *a) {
-    (void)n;
     const char *path = string(a[0]), *key = string(a[1]);
     uint64_t dest = integer_bits(a[4],false);
+    bool custody = n == 10 && a[9] != mp_const_none;
     mm_journal_config config = {{integer_bits(a[2],false),integer_bits(a[3],false),key,strlen(key)},
-        MM_JOURNAL_ORIGIN,MM_DESTINATION,dest,dest,0};
+        MM_JOURNAL_ORIGIN,custody ? MM_CUSTODY : MM_DESTINATION,
+        custody ? integer_bits(a[9],false) : dest,dest,0};
     mm_sqlite_column columns[MM_SQLITE_MAX_COLUMNS];
     mm_sqlite_definition def = {.columns=columns,.axis=MM_SQLITE_MAX_COLUMNS,.autotime=mp_obj_is_true(a[7])};
     bool create = mp_obj_is_true(a[8]);
@@ -73,7 +74,7 @@ static mp_obj_t db_open(size_t n, const mp_obj_t *a) {
     mm_sqlite_set_clock(self->db, utc_clock, NULL);
     return MP_OBJ_FROM_PTR(self);
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(open_obj, 9, 9, db_open);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(open_obj, 9, 10, db_open);
 
 static mp_obj_t db_close(mp_obj_t self) {
     store_obj *obj = MP_OBJ_TO_PTR(self);

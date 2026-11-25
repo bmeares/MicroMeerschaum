@@ -19,6 +19,6 @@ endif()
 if(CONFIG_MICROMEERSCHAUM_SQLITE)
     include(core/sqlite/engine.cmake)
     target_sources(${COMPONENT_LIB} PRIVATE "core/sqlite/instance.c" "core/sqlite/write.c"
-        "core/sqlite/rows.c" "core/sqlite/outbox.c" "ports/esp-idf/sqlite_vfs.c")
+        "core/sqlite/rows.c" "core/sqlite/outbox.c")
     target_link_libraries(${COMPONENT_LIB} PUBLIC mm_sqlite_engine)
 endif()
