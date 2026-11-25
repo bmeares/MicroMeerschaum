@@ -57,6 +57,10 @@ dependencies:
     version: v0.2.0
 ```
 
+## Run an action
+
+From a configured host, run `mrsm micro action show actions -i micro:bench` to see the actions that device exposes to your connection. Open `mrsm micro shell -i micro:bench` to use Tab completion and run several commands interactively. Applications can register their own actions alongside `show pipes`, `sync pipes` and `copy pipes`. [MicroPython actions and shell](docs/micropython-actions.md) · [ESP-IDF and Arduino actions](docs/native-actions.md) · [Host connection setup](docs/host-device.md)
+
 ## Build and test
 
 ```sh
