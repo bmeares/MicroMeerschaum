@@ -1,6 +1,6 @@
 # Syncing Pipes between nodes
 
-The first release targets a pair of nodes that can exchange a configured Pipe while disconnected from the internet. A node can originate readings, be the destination for a peer’s readings, or forward a stream to another peer or a Meerschaum instance. Applications construct a network by configuring these relationships for their Pipes. [Project scope](adr/0001-support-independent-meerschaum-deployments.md) · [Peer destinations](adr/0011-allow-peer-destinations.md)
+Two provisioned nodes can exchange a Pipe while disconnected from the internet. A node can originate readings, be the destination for a peer’s readings, or forward a stream to another peer or a Meerschaum instance. Applications construct a network by configuring these relationships for their Pipes. [Project scope](adr/0001-support-independent-meerschaum-deployments.md) · [Peer destinations](adr/0011-allow-peer-destinations.md)
 
 ## What a Pipe user needs to know
 
@@ -10,7 +10,7 @@ The framework assigns identities, tracks receipts and recognizes retries. A sens
 
 ### Capture now, send on the application's schedule
 
-When a driver already has readings, give it a push Pipe. When a plugin owns acquisition, select its named connector and let the Pipe ask it for data. Both operations are proposed for MicroPython and native ESP-IDF. The examples below use MicroPython. [Equivalent native application](device-api.md#one-temperature-pipe-in-two-environments)
+When a driver already has readings, give it a push Pipe. When a plugin owns acquisition, select its named connector and let the Pipe ask it for data. MicroPython and native ESP-IDF provide both operations. The examples below use MicroPython. [Equivalent native application](device-api.md#one-temperature-pipe-in-two-environments)
 
 ```python
 # A driver supplies two rows to a local sink.
@@ -34,7 +34,7 @@ In the desktop SQLite reference case, a successful incremental copy left an old 
 
 In Meerschaum, the source connector supplies data and the instance connector gives access to the Pipe’s stored rows and metadata. On a device, an ordinary collection Pipe can use the default local journal. Select `instance="sql:local"` on a supported board when the application needs to read or update local rows. Both choices let the device collect while disconnected. [Meerschaum glossary](https://github.com/bmeares/Meerschaum/blob/v5.1.5/GLOSSARY.md#pipes-and-data) · [On-device SQLite](adr/0010-offer-an-optional-on-device-sqlite-instance.md)
 
-For code that writes directly to a named peer, the proposed interface selects the peer instance in the Pipe constructor. This example supplies a frame as columns.
+In MicroPython, select a provisioned peer instance in the Pipe constructor to write directly to that peer. This example supplies a frame as columns.
 
 ```python
 from micromeerschaum import Pipe
@@ -72,13 +72,13 @@ For A=1 → B=2 → D=9, provision the same origin, Pipe key, generation and fin
 
 B builds onward batches using `pipe.batch()` or `mm_peer_batch()` on its incoming journal. It appends itself to an observed path, splitting the batch at a path boundary as necessary. The original record bytes, sequence, stream generation and final destination travel unchanged. A route-only arrival leaves the outgoing sequence cursor in place. The current BLE forwarding profile marks the new hop as BLE with timestamp zero (unknown). `pipe.routes()` returns each observed interval as `(first, last, authenticated_sender, reported_node_ids)`. Native `mm_journal_route_get()` also supplies the reported hop times and transports.
 
-The MicroPython BLE example provides `open_role`, `receive_window` and `send_window`. For example, after commissioning fixed-address authenticated bonds, B can run the following whenever the respective peers are available. Supply the enrolled aioble Device objects for A and D. An interrupted window leaves B's journal ready for the next connection. [MicroPython BLE example](../examples/micropython/offline_relay.py)
+The MicroPython BLE example provides `open_role`, `receive_window` and `send_window`. For example, after mounting its volume at `/mm` and commissioning fixed-address authenticated bonds, B can run the following whenever the respective peers are available. Supply the enrolled aioble Device objects for A and D. An interrupted window leaves B's journal ready for the next connection. [MicroPython BLE example](../examples/micropython/offline_relay.py)
 
 ```python
 import asyncio
 from offline_relay import open_role, receive_window, send_window
 
-relay = open_role("relay", "/store/RELAY.MM")
+relay = open_role("relay", "/mm/RELAY.MM")
 asyncio.run(receive_window(relay, origin_device, sender=1))
 asyncio.run(send_window(relay, destination_device, issuer=9))
 ```
@@ -138,4 +138,4 @@ A returning record in a cycle A → B → C → A still names A as its origin. A
 
 A node publishing a correction or aggregate gives the derived record its own identity and links it to its source data. The delivery path answers how a record arrived. Input references answer how a different result was produced. The appropriate precision for those references remains an open design question. [Stream generations](adr/0006-identify-stream-generations.md) · [Glossary](../GLOSSARY.md)
 
-Wire v0 already encodes one ordered path of up to eight hops per batch. The first-release design adds generation-scoped receipts and preserves distinct paths across arrivals. Existing captures remain readable through the v0 decoder. [v0 batch format](../spec/wire-format.md#batch)
+Wire v0 already encodes one ordered path of up to eight hops per batch. Wire v1 adds generation-scoped receipts and preserves distinct paths across arrivals. Existing captures remain readable through the v0 decoder. [v0 batch format](../spec/wire-format.md#batch)

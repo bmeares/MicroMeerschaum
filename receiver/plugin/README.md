@@ -4,7 +4,15 @@ This native Meerschaum 5.1.5 plugin accepts authenticated binary batches and ret
 
 ## Install
 
-Build on the host OS and architecture that runs the API. These commands install the library from the repository root on Linux with Rust and Meerschaum 5.1.5 installed.
+On Linux x86-64 with glibc and Meerschaum 5.1.5 installed, download `mm_receiver-0.1.0-linux-x86_64.tar.gz` and extract it into the plugin directory used by the API and worker. The archive supplies `mm_receiver/plugin.toml` and `mm_receiver/libmm_receiver.so`. [Download the Linux plugin](https://github.com/bmeares/MicroMeerschaum/releases/download/v0.1.0/mm_receiver-0.1.0-linux-x86_64.tar.gz) · [Release source](https://github.com/bmeares/MicroMeerschaum/archive/refs/tags/v0.1.0.tar.gz)
+
+```sh
+export MRSM_PLUGINS_DIR="${MRSM_PLUGINS_DIR:-$HOME/.config/meerschaum/plugins}"
+mkdir -p "$MRSM_PLUGINS_DIR"
+tar -xzf mm_receiver-0.1.0-linux-x86_64.tar.gz -C "$MRSM_PLUGINS_DIR"
+```
+
+To build your own native library, unpack the release source on the host OS and architecture that runs the API. Build the plugin with Rust using its locked dependencies. The release toolchain is Rust 1.99.0. The following install commands assume Linux.
 
 ```sh
 cargo build --manifest-path receiver/plugin/Cargo.toml --release --locked

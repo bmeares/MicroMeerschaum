@@ -1,4 +1,18 @@
-# Collect your first reading
+# MicroPython on ESP32-S3
+
+## Install the firmware
+
+Use an ESP32-S3 with a serial connection. The tested board configuration uses 8 MiB of flash and 2 MiB of quad PSRAM. Download `micromeerschaum-0.1.0-ESP32-S3.bin` and the matching source archive for the examples. The binary contains the bootloader, partition table and application. It reserves 2 MiB each for the native journal (`mmdata`) and Python files (`vfs`). For initial installation on a spare board, put it into download mode, set `PORT` to its serial port and run the following in a Python environment on your computer. Back up existing firmware and data before changing a board’s partition layout. [Download firmware](https://github.com/bmeares/MicroMeerschaum/releases/download/v0.1.0/micromeerschaum-0.1.0-ESP32-S3.bin) · [Source and examples](https://github.com/bmeares/MicroMeerschaum/archive/refs/tags/v0.1.0.tar.gz) · [Partition layout](../ports/micropython/boards/MM_ESP32_S3/partitions.csv)
+
+```sh
+python -m pip install 'esptool>=4.9,<5' mpremote
+PORT=/dev/ttyUSB0
+python -m esptool --chip esp32s3 --port "$PORT" write_flash 0x0 micromeerschaum-0.1.0-ESP32-S3.bin
+```
+
+Reset the board and run the commands below from the root of the unpacked source. Substitute the same serial port in each `mpremote connect` command.
+
+## Collect your first reading
 
 Use the MM_ESP32_S3 firmware and its dedicated journal partition. Each Pipe has an origin node ID, a generation and a destination node ID. The origin and generation stay the same through reboots. The destination can be another device that keeps the readings offline.
 
@@ -16,10 +30,10 @@ PY
 Copy the registration and the two example modules to the running board. The source reads the ESP32-S3's internal die temperature. [Sensor module](../examples/micropython/chip_sensor.py) · [Application](../examples/micropython/readings.py)
 
 ```sh
-mpremote fs cp device_identity.py :device_identity.py
-mpremote fs cp examples/micropython/chip_sensor.py :chip_sensor.py
-mpremote fs cp examples/micropython/readings.py :readings.py
-mpremote repl
+mpremote connect "$PORT" fs cp device_identity.py :device_identity.py
+mpremote connect "$PORT" fs cp examples/micropython/chip_sensor.py :chip_sensor.py
+mpremote connect "$PORT" fs cp examples/micropython/readings.py :readings.py
+mpremote connect "$PORT" repl
 ```
 
 On a **new board with a blank data partition**, provision the volume and sync one observation. Passing `first_boot=True` permits formatting the dedicated data partition if mounting fails. Use it only for intentional initial provisioning.
@@ -112,6 +126,20 @@ print(rows.get_sync_time(params={"station": "A"}))
 ```
 
 Both observations enter the immutable outgoing stream. The keyed query returns the corrected row. Reopen with the same identifiers and instance, omitting `create`, `columns` and `axis` to load the saved registration. On a timestamp axis, supply query bounds in signed Unix microseconds. `get_sync_time()` returns integer ticks or Unix microseconds, and returns `None` for an empty selection. SQLite reclaims the acknowledged outgoing prefix within the receipt transaction. Current rows remain readable.
+
+## Build the board firmware from source
+
+Use the v0.1.0 source and an activated ESP-IDF **5.5.1** toolchain for MicroPython **v1.28.0**. From the MicroMeerschaum source root, clone MicroPython into a fresh sibling directory. The board manifest freezes the Python modules and enables the native journal, SQLite and HTTPS bindings. The build fetches the pinned SQLite amalgamation and LittleFS component.
+
+```sh
+board="$PWD/ports/micropython/boards/MM_ESP32_S3"
+git clone --branch v1.28.0 --depth 1 https://github.com/micropython/micropython.git ../micropython
+make -C ../micropython/mpy-cross -j4
+make -C ../micropython/ports/esp32 BOARD_DIR="$board" submodules
+make -C ../micropython/ports/esp32 BOARD_DIR="$board"
+```
+
+Flash `../micropython/ports/esp32/build-MM_ESP32_S3/firmware.bin` at offset zero using the installation command above. The native ESP-IDF storage examples use their own SDK version. [Native storage build](device-storage.md#run-the-storage-example)
 
 ## Build and test on Unix
 
