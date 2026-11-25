@@ -5,4 +5,9 @@ menu "MicroMeerschaum"
         help
             Provide the ESP-IDF client for the hosted binary ingest endpoint.
             The application provisions the receiver identity, URL and API key.
+    config MICROMEERSCHAUM_SQLITE
+        bool "Enable the SQLite local Pipe instance"
+        default n
+        help
+            Store typed rows and outgoing records on a mounted LittleFS volume.
 endmenu
