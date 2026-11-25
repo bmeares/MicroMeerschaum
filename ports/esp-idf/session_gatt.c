@@ -2,6 +2,7 @@
 #include "micromeerschaum/session_gatt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "host/ble_att.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
@@ -16,6 +17,7 @@ static mm_device_session *session;
 static mm_session_peer_fn enroll;
 static void *enroll_ctx;
 static TaskHandle_t worker;
+static SemaphoreHandle_t fragment_done;
 static struct ble_npl_event notification;
 
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
@@ -42,7 +44,7 @@ static bool enrolled(uint16_t conn, ble_addr_t *id)
     return true;
 }
 
-static void revoke(uint16_t conn)
+void mm_session_gatt_revoke(uint16_t conn)
 {
     portENTER_CRITICAL(&lock);
     if (owner == conn) {
@@ -67,16 +69,16 @@ static bool current(uint16_t conn, uint64_t gen)
 void mm_session_gatt_event(const struct ble_gap_event *e)
 {
     if (!session || !e) return;
-    if (e->type == BLE_GAP_EVENT_DISCONNECT) { revoke(e->disconnect.conn.conn_handle); return; }
+    if (e->type == BLE_GAP_EVENT_DISCONNECT) { mm_session_gatt_revoke(e->disconnect.conn.conn_handle); return; }
     if (e->type == BLE_GAP_EVENT_ENC_CHANGE) {
         ble_addr_t id;
-        if (!enrolled(e->enc_change.conn_handle, &id)) revoke(e->enc_change.conn_handle);
+        if (!enrolled(e->enc_change.conn_handle, &id)) mm_session_gatt_revoke(e->enc_change.conn_handle);
         return;
     }
     if (e->type != BLE_GAP_EVENT_SUBSCRIBE || e->subscribe.attr_handle != tx_handle) return;
     uint16_t conn = e->subscribe.conn_handle;
     ble_addr_t id;
-    if (!e->subscribe.cur_notify || !enrolled(conn, &id)) { revoke(conn); return; }
+    if (!e->subscribe.cur_notify || !enrolled(conn, &id)) { mm_session_gatt_revoke(conn); return; }
     portENTER_CRITICAL(&lock);
     if (owner == BLE_HS_CONN_HANDLE_NONE) {
         owner = conn;
@@ -91,7 +93,7 @@ static int receive(uint16_t conn, uint16_t handle, struct ble_gatt_access_ctxt *
     (void)handle; (void)arg;
     if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) return BLE_ATT_ERR_READ_NOT_PERMITTED;
     ble_addr_t id;
-    if (!enrolled(conn, &id)) { revoke(conn); return BLE_ATT_ERR_INSUFFICIENT_AUTHOR; }
+    if (!enrolled(conn, &id)) { mm_session_gatt_revoke(conn); return BLE_ATT_ERR_INSUFFICIENT_AUTHOR; }
     /* A fragment contains bytes from one frame. Keep all application work
      * off the NimBLE host stack, including JSON parsing and Pipe callbacks. */
     uint8_t fragment[BLE_ATT_MTU_MAX];
@@ -101,7 +103,7 @@ static int receive(uint16_t conn, uint16_t handle, struct ble_gatt_access_ctxt *
     const uint8_t *lf = memchr(fragment, '\n', n);
     if (lf && lf != fragment + n - 1) {
         /* A nonconforming writer must never resume an earlier partial frame. */
-        revoke(conn);
+        mm_session_gatt_revoke(conn);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
     int result = 0;
@@ -152,18 +154,26 @@ static void send_on_host(struct ble_npl_event *event)
         tx_status = om ? ble_gatts_notify_custom(job_owner, tx_handle, om) : BLE_HS_ENOMEM;
         if (!tx_status) tx_sent = n;
     }
-    xTaskNotifyGive(worker);
+    if (!tx_status && tx_data && tx_sent == tx_remaining) {
+        /* The peer can write its next request as soon as it sees the final
+         * notification. Release the input slot before the host handles it. */
+        portENTER_CRITICAL(&lock);
+        length = 0;
+        discard = busy = false;
+        portEXIT_CRITICAL(&lock);
+    }
+    xSemaphoreGive(fragment_done);
 }
 
 static void submit_fragment(void)
 {
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &notification);
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    xSemaphoreTake(fragment_done, portMAX_DELAY);
 }
 
-static bool emit(const char *bytes, size_t len, void *unused)
+static bool emit(const char *bytes, size_t len, void *ctx)
 {
-    (void)unused;
+    bool *released = ctx;
     tx_data = bytes;
     tx_remaining = len;
     unsigned retries = 0;
@@ -178,7 +188,10 @@ static bool emit(const char *bytes, size_t len, void *unused)
         tx_data += tx_sent;
         tx_remaining -= tx_sent;
     }
-    if (!tx_remaining) return true;
+    if (!tx_remaining) {
+        *released = true;
+        return true;
+    }
     tx_data = NULL;
     submit_fragment();
     return false;
@@ -189,8 +202,10 @@ static void run(void *unused)
     (void)unused;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        bool released = false;
         if (current(job_owner, job_generation))
-            mm_device_session_line(session, request, length, emit, NULL);
+            mm_device_session_line(session, request, length, emit, &released);
+        if (released) continue;
         portENTER_CRITICAL(&lock);
         length = 0;
         discard = busy = false;
@@ -205,12 +220,14 @@ int mm_session_gatt_register(mm_device_session *s, mm_session_peer_fn allowed, v
     enroll = allowed;
     enroll_ctx = user;
     ble_npl_event_init(&notification, send_on_host, NULL);
-    int rc = xTaskCreate(run, "mm_session", CONFIG_MICROMEERSCHAUM_SESSION_STACK, NULL,
+    fragment_done = xSemaphoreCreateBinary();
+    int rc = fragment_done && xTaskCreate(run, "mm_session", CONFIG_MICROMEERSCHAUM_SESSION_STACK, NULL,
                          tskIDLE_PRIORITY + 2, &worker) == pdPASS ? 0 : BLE_HS_ENOMEM;
     if (!rc) rc = ble_gatts_count_cfg(services);
     if (!rc) rc = ble_gatts_add_svcs(services);
     if (rc) {
         if (worker) { vTaskDelete(worker); worker = NULL; }
+        if (fragment_done) { vSemaphoreDelete(fragment_done); fragment_done = NULL; }
         ble_npl_event_deinit(&notification);
         session = NULL;
     }

@@ -159,6 +159,9 @@ static void console(void)
             if (byte == prefix[matched]) {
                 if (++matched == sizeof prefix - 1) {
                     framed = true;
+                    /* The last human prompt may still be the terminal's current
+                     * line. Give the framed response its own line boundary. */
+                    if (!usb_write("\r\n", 2, NULL)) return;
                     if (!mm_device_session_feed(&serial, prefix, matched, usb_write, NULL)) break;
                 }
                 continue;
