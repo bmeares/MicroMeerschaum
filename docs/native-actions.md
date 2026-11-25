@@ -27,3 +27,18 @@ A trusted local prompt uses `mm_actions_local(&actions)`. For a remote caller, c
 The default maximum is 4224 input bytes and 32 parsed arguments after the matched name. Oversized lines, excess arguments, malformed quoting and embedded control bytes fail before invocation. Lines may contain spaces and tabs. Limits can be changed consistently across the core and its consumers at compile time. Allocate one workspace per overlapping dispatch. On small tasks, keep it in application storage. The prompt includes its own bounded input and decoding buffers and uses a caller-supplied reply buffer.
 
 For a byte-oriented port, initialize an `mm_action_shell` with its view, parsing mode, reply buffer, write callback and echo setting. Feed received bytes to `mm_action_shell_feed`. CR, LF or CRLF submits a line, Backspace and DEL erase a byte, Tab completes or lists visible names, and Ctrl-C cancels the current line. An overlong or invalid line is discarded through its terminator. The session ends on `exit`, Ctrl-D at an empty prompt, or a failed output callback. A serial driver retains ownership of its UART and connection state.
+
+## Publish configured Pipes
+
+Use `mm_pipe_actions_register(&actions, &bindings, &config)` to add the three Pipe commands. Provide three free action slots and keep the bindings and configuration in application storage. The configuration supplies an explicit table of open handles and their instance names. A destination has a name, a synchronous delivery callback and its context. The callback can call `mm_send_window` on the entry's journal and report its confirmed progress. [Pipe action API](../core/include/micromeerschaum/pipe_actions.h) · [Local write and receipt-backed copy example](../core/tests/test_pipe_actions.c)
+
+| Command | Effect |
+| --- | --- |
+| `show pipes -c plugin:sample` | List matching admitted Pipes, printing connector, metric, location and instance. |
+| `sync pipes` | Run each configured source through `mm_pipe_sync_source`, skipping push-only handles. |
+| `sync pipes -m daily -l None` | Fetch and commit matching source Pipes whose location is unset. If any selected handle is push-only, the request fails before fetching. |
+| `copy pipes peer:lab -i journal:local` | Deliver retained records for the selected Pipes to the named destination. Report batches and the confirmed sequence returned by the application. |
+
+Selectors take one exact value each. Use `-c`, `-m`, `-l`, `-i` or their long forms `--connector-keys`, `--metric-keys`, `--location-keys`, and `--instance` (`--mrsm-instance` also works). An empty location or `None` selects an unset location. Partial sync and copy errors include confirmed progress. An uncertain write includes the candidate sequence when available.
+
+For remote sessions, the application must admit the action and the Pipe. Its Pipe predicate receives the session view, published handle, requested operation and destination for copies. `MM_PIPE_SHOW` controls discovery and selection. All visible matches must also pass the requested `MM_PIPE_SYNC` or `MM_PIPE_COPY` check before the first side effect. The default Pipe predicate allows trusted local views only. Serialize access to the handles and keep the published table stable during a request.

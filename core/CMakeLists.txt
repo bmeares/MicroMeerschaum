@@ -12,7 +12,7 @@ if(MM_SANITIZE)
 endif()
 
 add_library(micromeerschaum src/crc32.c src/wire.c src/record.c src/segment.c src/batch.c
-            src/protocol.c src/document.c src/pipe.c src/gatt.c src/actions.c src/action_shell.c)
+            src/protocol.c src/document.c src/pipe.c src/gatt.c src/actions.c src/action_shell.c src/pipe_actions.c)
 target_include_directories(micromeerschaum PUBLIC include)
 target_compile_options(micromeerschaum PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Werror)
 if(MM_SANITIZE)
@@ -36,7 +36,7 @@ if(UNIX)
     target_link_libraries(micromeerschaum_posix PUBLIC micromeerschaum)
     target_compile_options(micromeerschaum_posix PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Werror)
 
-    foreach(test journal delivery sender volume custody)
+    foreach(test journal delivery sender volume custody pipe_actions)
         add_executable(test_${test} tests/test_${test}.c)
         target_link_libraries(test_${test} PRIVATE micromeerschaum_posix)
         target_compile_options(test_${test} PRIVATE -Wall -Wextra -Wpedantic -Werror)

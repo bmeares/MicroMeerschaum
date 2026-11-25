@@ -2,6 +2,7 @@
 #pragma once
 #include "micromeerschaum/pipe.hpp"
 #include "micromeerschaum/actions.h"
+#include "micromeerschaum/pipe_actions.h"
 #include "micromeerschaum/journal_pipe.h"
 #include "micromeerschaum/peer.h"
 #include "micromeerschaum/gatt.h"
