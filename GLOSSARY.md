@@ -52,6 +52,14 @@ The component that maps a device pipe’s records to rows in one or more destina
 
 A named source of observations for one or more device pipes. It supplies documents in the application’s vocabulary.
 
+**Device action**
+
+A named operation that an application or operator can ask a node to perform. A custom action gives an application’s own operation a name in the same vocabulary as the built-in actions.
+
+**Device shell**
+
+The interactive interface through which an operator invokes device actions by name and sees their results.
+
 **Device pipe sync**
 
 A durable write to the Pipe’s selected target. The caller can supply a frame or use the Pipe’s source. A locally stored Pipe can sync while disconnected and track onward delivery separately.
