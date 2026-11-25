@@ -187,7 +187,7 @@ static mm_journal_status load_state(mm_journal *j)
         st = MM_JOURNAL_CONFLICT;
     else {
         j->confirmed = mm_get64(buf + 24);
-        if (c->mode == MM_JOURNAL_RECEIVER && j->confirmed) st = MM_JOURNAL_CORRUPT;
+        if (c->mode == MM_JOURNAL_RECEIVER && c->role != MM_CUSTODY && j->confirmed) st = MM_JOURNAL_CORRUPT;
         j->high = j->confirmed;
     }
     free(buf);
@@ -798,23 +798,27 @@ mm_journal_status mm_journal_append(mm_journal *j, mm_kind kind, uint64_t mono_u
 
 mm_journal_status mm_journal_confirm(mm_journal *j, const mm_receipt *receipt)
 {
-    if (!j || !receipt || j->config.mode != MM_JOURNAL_ORIGIN) return MM_JOURNAL_INVALID;
+    if (!j || !receipt || (j->config.mode == MM_JOURNAL_RECEIVER && j->config.role != MM_CUSTODY)) return MM_JOURNAL_INVALID;
     if (j->uncertain) return MM_JOURNAL_UNCERTAIN;
     const mm_journal_config *c = &j->config;
-    if (receipt->role != c->role || receipt->issuer != c->issuer ||
+    bool relay = c->mode == MM_JOURNAL_RECEIVER;
+    if (receipt->role != (relay ? MM_DESTINATION : c->role) ||
+        receipt->issuer != (relay ? c->destination : c->issuer) ||
         receipt->destination != c->destination || !mm_stream_equal(&receipt->stream, &c->stream))
         return MM_JOURNAL_CONFLICT;
-    if (receipt->through > j->high) return MM_JOURNAL_INVALID;
-    if (receipt->through <= j->confirmed) return MM_JOURNAL_OK;
-    mm_journal_status st = store_state(j, receipt->through);
+    uint64_t through = receipt->through;
+    if (relay && through > mm_journal_prefix(j)) through = mm_journal_prefix(j);
+    if (through > j->high) return MM_JOURNAL_INVALID;
+    if (through <= j->confirmed) return MM_JOURNAL_OK;
+    mm_journal_status st = store_state(j, through);
     if (st == MM_JOURNAL_UNCERTAIN) return uncertain(j);
-    if (st == MM_JOURNAL_OK) j->confirmed = receipt->through;
+    if (st == MM_JOURNAL_OK) j->confirmed = through;
     return st;
 }
 
 mm_journal_status mm_journal_reclaim(mm_journal *j)
 {
-    if (!j || j->config.mode != MM_JOURNAL_ORIGIN) return MM_JOURNAL_INVALID;
+    if (!j || (j->config.mode == MM_JOURNAL_RECEIVER && j->config.role != MM_CUSTODY)) return MM_JOURNAL_INVALID;
     if (j->uncertain) return MM_JOURNAL_UNCERTAIN;
     if (j->volume) {
         mm_journal_status st = mm_volume_trim(j->volume, j->confirmed);
@@ -837,6 +841,7 @@ mm_journal_status mm_journal_reclaim(mm_journal *j)
         j->bytes -= s.size;
     }
     if (kept == j->count) {
+        if (j->config.mode == MM_JOURNAL_RECEIVER) return MM_JOURNAL_OK;
         mm_journal_status st = mm_journal_flush_loss(j);
         return st == MM_JOURNAL_FULL ? MM_JOURNAL_OK : st;
     }
@@ -846,6 +851,7 @@ mm_journal_status mm_journal_reclaim(mm_journal *j)
 #ifndef ESP_PLATFORM
     if (!j->volume && sync_fd(j, j->dir) < 0) return uncertain(j);
 #endif
+    if (j->config.mode == MM_JOURNAL_RECEIVER) return MM_JOURNAL_OK;
     mm_journal_status st = mm_journal_flush_loss(j);
     return st == MM_JOURNAL_FULL ? MM_JOURNAL_OK : st;
 }
