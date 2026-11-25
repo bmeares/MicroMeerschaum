@@ -4,7 +4,7 @@ The first release targets MicroPython and native ESP-IDF C/C++, including Arduin
 
 ## One temperature Pipe in two environments
 
-Both applications use a provisioned local journal. The Python example uses the default node. The native example binds a named Pipe to the application's open journal.
+For initial MicroPython provisioning, plugin installation and reboot recovery, follow the [device walkthrough](micropython.md). Both applications use a provisioned local journal. The Python example uses the default node. The native example binds a named Pipe to the application's open journal.
 
 ```python
 from micromeerschaum import Pipe
@@ -60,6 +60,8 @@ Document sync groups up to eight rows that fit in the caller’s scratch buffer.
 
 The result’s `confirmed` counts the leading input rows committed by that call. On `MM_JOURNAL_UNCERTAIN`, reopen the same generation before reusing the handle. If `uncertain_count` is positive, compare the records beginning at `uncertain_first` with the corresponding original input, including its monotonic time, boot ID and exact payload. Account for matching rows before submitting the remaining suffix. Treat different bytes at an assigned identity as a conflict. The journal test injects a failed directory sync after publishing the second group and checks the candidate records after restart. [First-use and recovery test](../core/tests/test_pipe.cpp)
 
+The optional SQLite target uses the same Pipe handle. It adds typed keyed rows, bounded queries and an immutable outgoing record for each committed observation. [SQLite provisioning, receipt handling and device qualification](device-sqlite.md)
+
 ## What the implementations share
 
 The portable C library owns Pipe identity, document and batch encoding, local commit and recovery, and delivery progress. Both APIs use that library for these operations. The MicroPython module converts built-in containers and calls Python source plugins. The ESP-IDF component exposes the C interface directly and provides a thin C++ Pipe wrapper. Its firmware runs independently of a Python interpreter. Keep filesystem and radio calls in the port, and keep sensor timing, wake intervals and task orchestration in the application. [MicroPython native modules](https://docs.micropython.org/en/v1.28.0/develop/cmodules.html) · [ESP-IDF C++ support](https://docs.espressif.com/projects/esp-idf/en/release-v5.5/esp32/api-guides/cplusplus.html)
@@ -71,7 +73,7 @@ Changing the firmware language should preserve a stream when the replacement fir
 | Environment | Available in this checkout | Evidence needed for supported device sync |
 | --- | --- | --- |
 | ESP-IDF C/C++ | C/C++ Pipe API and bounded volume journal. Both SDMMC/FAT and on-board LittleFS examples cross-build for ESP32-S3. Two QEMU boots recovered successive groups on LittleFS. [Storage example and evidence](device-storage.md) | Build a native application using the public Pipe API. Commit and reopen a batch on the chosen medium. Exchange it with a MicroPython peer over BLE GATT in both role assignments, including a lost reply and reboot. |
-| MicroPython | Release design for a native module and Python source plugins. | Build the module into a named board image. Install a sensor module, sync its first row, then run the same recovery and peer tests through the Python API. |
+| MicroPython | Native journal and document codec, installed Python sources and bounded sync. The Unix integration test recovers original records and the confirmed cursor after switching between native C and MicroPython in both directions. [Application and tests](micropython.md) | Repeat the transfer, lost reply, power interruption and reboot scenarios on the named physical board and medium. |
 | Arduino-ESP32 on ESP32-S3 | A standalone sketch using a temporary library passed the emulator codec test below. | Ship the native sources as an installable library. Build an example `.ino` with Arduino CLI and pass the local durability and peer retry tests on the board and medium qualified for ESP-IDF. |
 
 For each environment, record the board, SDK or interpreter version, medium, peak RAM, commit latency and acquisition stalls at the same batch size and durability setting. That gives a firmware author a basis for choosing document batches or a compact native payload. Espressif documents the IDF-component workflow, and Arduino specifies a separate library layout for sketch installations. [Arduino as an ESP-IDF component](https://docs.espressif.com/projects/arduino-esp32/en/latest/esp-idf_component.html) · [Arduino library specification](https://docs.arduino.cc/arduino-cli/library-specification/)

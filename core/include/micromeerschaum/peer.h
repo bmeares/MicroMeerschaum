@@ -8,9 +8,10 @@
 extern "C" {
 #endif
 
-/* Direct destination exchange on the host journal. The caller transports the
+/* Scoped exchange on a journal. The caller transports the
  * bytes and supplies the identity established by the authenticated link.
- * This profile accepts one provisioned origin and destination, with no relays.
+ * The link authorizes the immediate sender for this stream and final destination.
+ * A receiver with role MM_CUSTODY retains records for onward delivery.
  * Serialize operations on a journal and use separate input and output buffers. */
 
 /* Fill one batch with whole records after the given sequence, up to max_records
@@ -22,7 +23,7 @@ mm_journal_status mm_peer_batch(mm_journal *origin, uint64_t after, uint32_t max
 
 /* Validate and commit the batch before issuing its cumulative receipt. On any
  * failure *reply_len is zero. Retrying identical bytes is safe after reopen. */
-mm_journal_status mm_peer_receive(mm_journal *receiver, uint64_t authenticated_origin,
+mm_journal_status mm_peer_receive(mm_journal *receiver, uint64_t authenticated_sender,
                                   const uint8_t *batch, size_t batch_len,
                                   uint8_t *reply, size_t reply_cap, size_t *reply_len);
 
