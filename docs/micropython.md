@@ -2,12 +2,12 @@
 
 ## Install the firmware
 
-Use an ESP32-S3 with a serial connection. The tested board configuration uses 8 MiB of flash and 2 MiB of quad PSRAM. Download `micromeerschaum-0.1.0-ESP32-S3.bin` and the matching source archive for the examples. The binary contains the bootloader, partition table and application. It reserves 2 MiB each for the native journal (`mmdata`) and Python files (`vfs`). For initial installation on a spare board, put it into download mode, set `PORT` to its serial port and run the following in a Python environment on your computer. Back up existing firmware and data before changing a board’s partition layout. [Download firmware](https://github.com/bmeares/MicroMeerschaum/releases/download/v0.1.0/micromeerschaum-0.1.0-ESP32-S3.bin) · [Source and examples](https://github.com/bmeares/MicroMeerschaum/archive/refs/tags/v0.1.0.tar.gz) · [Partition layout](../ports/micropython/boards/MM_ESP32_S3/partitions.csv)
+Use an ESP32-S3 with a serial connection. The tested board configuration uses 8 MiB of flash and 2 MiB of quad PSRAM. Download `micromeerschaum-0.2.0-ESP32-S3.bin` and the matching source archive for the examples. The binary contains the bootloader, partition table and application. It reserves 2 MiB each for the native journal (`mmdata`) and Python files (`vfs`). For initial installation on a spare board, put it into download mode, set `PORT` to its serial port and run the following in a Python environment on your computer. Back up existing firmware and data before changing a board’s partition layout. [Download firmware](https://github.com/bmeares/MicroMeerschaum/releases/download/v0.2.0/micromeerschaum-0.2.0-ESP32-S3.bin) · [Source and examples](https://github.com/bmeares/MicroMeerschaum/archive/refs/tags/v0.2.0.tar.gz) · [Partition layout](../ports/micropython/boards/MM_ESP32_S3/partitions.csv)
 
 ```sh
 python -m pip install 'esptool>=4.9,<5' mpremote
 PORT=/dev/ttyUSB0
-python -m esptool --chip esp32s3 --port "$PORT" write_flash 0x0 micromeerschaum-0.1.0-ESP32-S3.bin
+python -m esptool --chip esp32s3 --port "$PORT" write_flash 0x0 micromeerschaum-0.2.0-ESP32-S3.bin
 ```
 
 Reset the board and run the commands below from the root of the unpacked source. Substitute the same serial port in each `mpremote connect` command.
@@ -182,13 +182,13 @@ Both observations enter the immutable outgoing stream. The keyed query returns t
 
 ## Build the board firmware from source
 
-Use the v0.1.0 source and an activated ESP-IDF **5.5.1** toolchain for MicroPython **v1.28.0**. From the MicroMeerschaum source root, clone MicroPython into a fresh sibling directory. The board manifest freezes the Python modules and enables the native journal, SQLite and HTTPS bindings. The build fetches the pinned SQLite amalgamation and LittleFS component.
+Use the v0.2.0 source and an activated ESP-IDF **5.5.1** toolchain for MicroPython **v1.28.0**. From the MicroMeerschaum source root, clone MicroPython into a fresh sibling directory. The board manifest freezes the Python modules and enables the native journal, SQLite and HTTPS bindings. The build fetches the pinned SQLite amalgamation and LittleFS component.
 
 ```sh
 board="$PWD/ports/micropython/boards/MM_ESP32_S3"
 git clone --branch v1.28.0 --depth 1 https://github.com/micropython/micropython.git ../micropython
 git -C ../micropython apply "$PWD/ports/micropython/patches/v1.28.0-nimble-passkey.patch"
-export MICROPY_GIT_TAG=v1.28.0+micromeerschaum.0.1.0
+export MICROPY_GIT_TAG=v1.28.0+micromeerschaum.0.2.0
 make -C ../micropython/mpy-cross -j4
 make -C ../micropython/ports/esp32 BOARD_DIR="$board" submodules
 make -C ../micropython/ports/esp32 BOARD_DIR="$board"

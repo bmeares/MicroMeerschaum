@@ -62,6 +62,19 @@ jobs:
       - run: cargo clippy --manifest-path plugin/Cargo.toml --locked --all-targets -- -D warnings
       - run: cargo test --manifest-path plugin/Cargo.toml --locked
 
+  device-instance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          python3 -m venv "$RUNNER_TEMP/host"
+          "$RUNNER_TEMP/host/bin/pip" install meerschaum==5.1.6 pyserial
+          echo "$RUNNER_TEMP/host/bin" >> "$GITHUB_PATH"
+      - run: cargo build --manifest-path receiver/plugin/Cargo.toml --locked
+      - run: |
+          python receiver/plugin/tests/device_instance.py \
+              --library receiver/plugin/target/debug/libmicro.so --python "$(command -v python)"
+
   vectors:
     runs-on: ubuntu-24.04
     steps:
