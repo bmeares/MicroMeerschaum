@@ -139,3 +139,16 @@ small.close()
 p.close()
 dest.close()
 print("frame adapter and durable overflow count")
+
+# Reopening a registered stream and constructing its API instance performs no exchanges.
+p = origin()
+dest = receiver()
+provision_peer("api:cloud", 2, exchange)
+before = len(requests)
+api = Pipe("sensor", "temperature", instance="api:cloud")
+assert len(requests) == before
+assert api.sync({"tick": 101})[0] and len(requests) == before + 1
+assert dest.read_doc(17)["tick"] == 101
+p.close()
+dest.close()
+print("provisioned API instance and durable receipt")

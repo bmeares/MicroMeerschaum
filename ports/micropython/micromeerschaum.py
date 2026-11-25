@@ -34,10 +34,14 @@ class _Registration:
         self.retention = retention
 
 
+def _remote(name):
+    return name.startswith("peer:") or name.startswith("api:")
+
+
 def provision_peer(name, issuer, exchange, cap=4096, max_records=8):
     """Install the transport to an authenticated, provisioned destination."""
-    if not isinstance(name, str) or not name.startswith("peer:") or len(name) == 5:
-        raise ValueError("expected peer:name")
+    if not isinstance(name, str) or not _remote(name) or not name.split(":", 1)[1]:
+        raise ValueError("expected peer:name or api:name")
     if not callable(exchange) or not isinstance(issuer, int) or not 0 < issuer < 1 << 64:
         raise ValueError("expected an issuer and exchange(batch) callable")
     if cap < 1 or max_records < 1:
@@ -123,7 +127,7 @@ class Pipe:
         self.uncertain_count = 0
 
     def _id(self):
-        return (_local if self.instance_keys.startswith("peer:") else self.instance_keys, self._wire)
+        return (_local if _remote(self.instance_keys) else self.instance_keys, self._wire)
 
     def _config(self):
         config = _stores.get(self._id())
@@ -162,7 +166,7 @@ class Pipe:
 
     def sync(self, df=_missing, **kw):
         self.staged_input = self.confirmed_input = self.uncertain_first = self.uncertain_count = 0
-        remote = self.instance_keys.startswith("peer:")
+        remote = _remote(self.instance_keys)
         start = None
         try:
             config = self._config()
@@ -248,7 +252,8 @@ class Pipe:
         self._config().store.confirm(authenticated_issuer, receipt)
 
     def reclaim(self):
-        self._config().store.reclaim()
+        if self.instance_keys != "sql:local":
+            self._config().store.reclaim()
 
     def _peer(self, name):
         peer = _peers.get(name)
