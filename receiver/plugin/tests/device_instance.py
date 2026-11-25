@@ -77,6 +77,9 @@ class Device:
                         failure = "device storage error (confirmed 1 input row)"
                     else:
                         rows.extend(req["rows"])
+                        if simulate == "go offline":
+                            os.unlink(self.port)
+                            continue
                         if simulate == "drop":
                             continue
                         data = "Stored %d rows" % len(req["rows"])
@@ -159,6 +162,9 @@ def qualify(root, library, transport_python):
     shutil.copy2(library, package / library.name)
     shutil.copy2(PLUGIN / "plugin.toml", package)
     device = Device()
+    port = root / "serial-port"
+    port.symlink_to(device.port)
+    device.port = str(port)
     for name in list(os.environ):
         if name.startswith("MRSM_"):
             del os.environ[name]
@@ -339,6 +345,17 @@ def guard_tests(remote, other, device, config, python):
         "micro", "reconcile", token, "-i", "micro:bench", ok=False
     )
     assert "Reconciliation recorded" in reconcile(recovery_token(msg))
+
+    # The device disappears after committing. Its catalog cannot answer the forced retry.
+    before = device.writes
+    ok, msg = remote.sync(
+        [{"simulate": "go offline"}], force=True, retries=2, min_seconds=0
+    )
+    assert not ok and "unknown" in msg.lower() and device.writes == before + 1, msg
+    assert "Reconciliation recorded" in reconcile(recovery_token(msg))
+    ok, msg = remote.sync([{"value": 42}])
+    assert not ok and "could not open port" in msg and "reconcile" not in msg, msg
+    os.symlink(os.ttyname(device.slave), device.port)
 
     # An oversized request fails locally and leaves the Pipe available.
     ok, msg = remote.sync([{"value": "x" * 4096}])
