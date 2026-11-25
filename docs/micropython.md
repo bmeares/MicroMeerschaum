@@ -134,10 +134,14 @@ Use the v0.1.0 source and an activated ESP-IDF **5.5.1** toolchain for MicroPyth
 ```sh
 board="$PWD/ports/micropython/boards/MM_ESP32_S3"
 git clone --branch v1.28.0 --depth 1 https://github.com/micropython/micropython.git ../micropython
+git -C ../micropython apply "$PWD/ports/micropython/patches/v1.28.0-nimble-passkey.patch"
+export MICROPY_GIT_TAG=v1.28.0+micromeerschaum.0.1.0
 make -C ../micropython/mpy-cross -j4
 make -C ../micropython/ports/esp32 BOARD_DIR="$board" submodules
 make -C ../micropython/ports/esp32 BOARD_DIR="$board"
 ```
+
+The patch forwards the NimBLE passkey event through the callback shared by the central and peripheral. Both devices can then complete authenticated first-time pairing. It applies to the pinned MicroPython checkout. [Board patch](../ports/micropython/patches/v1.28.0-nimble-passkey.patch)
 
 Flash `../micropython/ports/esp32/build-MM_ESP32_S3/firmware.bin` at offset zero using the installation command above. The native ESP-IDF storage examples use their own SDK version. [Native storage build](device-storage.md#run-the-storage-example)
 
