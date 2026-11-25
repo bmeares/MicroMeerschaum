@@ -4,7 +4,7 @@ Build the C example with `cmake -S core -B build && cmake --build build --target
 
 ## Attach an existing console
 
-Initialize an `mm_actions` registry with a caller-owned array of descriptor pointers. The built-ins `help` and `show actions` occupy two slots. Register each additional `mm_action` once. Its case-sensitive name and optional alias may contain multiple words separated by single spaces. Duplicate names and aliases fail registration atomically. Keep the descriptors, strings, slots and application state alive for the lifetime of the registry. [Public API](../core/include/micromeerschaum/actions.h)
+Initialize an `mm_actions` registry with a caller-owned array of descriptor pointers. The built-ins `help` and `show actions` occupy two slots. An application with an existing `help` command can supply its descriptor, alias and handler to `mm_actions_init_with_help` to preserve its replies. Register each additional `mm_action` once. Its case-sensitive name and optional alias may contain multiple words separated by single spaces. Duplicate names and aliases fail registration atomically. Keep the descriptors, strings, slots and application state alive for the lifetime of the registry. [Public API](../core/include/micromeerschaum/actions.h)
 
 An existing line reader can call the dispatcher directly. For example, this function receives a complete line without the terminal newline and collects its reply.
 

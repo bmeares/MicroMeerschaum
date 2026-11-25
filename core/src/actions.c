@@ -47,18 +47,29 @@ bool mm_actions_register(mm_actions *r, const mm_action *a)
 static bool help(const mm_action_call *, mm_action_output *, void *);
 static bool show_actions(const mm_action_call *, mm_action_output *, void *);
 
-bool mm_actions_init(mm_actions *r, const mm_action **slots, size_t capacity)
+bool mm_actions_init_with_help(mm_actions *r, const mm_action **slots, size_t capacity,
+                               const mm_action *help_action)
 {
-    static const mm_action help_action = {"help", NULL, "help [ACTION]", help, NULL};
     static const mm_action list_action = {"show actions", NULL, "List available actions.",
                                          show_actions, NULL};
     if (!r) return false;
     *r = (mm_actions){0};
-    if (!slots || capacity < 2) return false;
-    *r = (mm_actions){slots, 2, capacity};
-    slots[0] = &help_action;
-    slots[1] = &list_action;
+    if (!slots || capacity < 2 || !help_action || !help_action->name ||
+        strcmp(help_action->name, "help") != 0 ||
+        (help_action->alias && strcmp(help_action->alias, list_action.name) == 0)) return false;
+    *r = (mm_actions){slots, 0, capacity};
+    if (!mm_actions_register(r, help_action)) {
+        *r = (mm_actions){0};
+        return false;
+    }
+    slots[r->count++] = &list_action;
     return true;
+}
+
+bool mm_actions_init(mm_actions *r, const mm_action **slots, size_t capacity)
+{
+    static const mm_action help_action = {"help", NULL, "help [ACTION]", help, NULL};
+    return mm_actions_init_with_help(r, slots, capacity, &help_action);
 }
 
 static bool allow_local(const mm_action *a, void *ctx)
@@ -70,12 +81,12 @@ static bool allow_local(const mm_action *a, void *ctx)
 
 mm_action_view mm_actions_local(const mm_actions *r)
 {
-    return (mm_action_view){r, allow_local, NULL};
+    return (mm_action_view){r, allow_local, NULL, true};
 }
 
 mm_action_view mm_actions_remote(const mm_actions *r, mm_action_admit_fn admit, void *ctx)
 {
-    return (mm_action_view){r, admit, ctx};
+    return (mm_action_view){r, admit, ctx, false};
 }
 
 static bool visible(const mm_action_view *view, const mm_action *a)

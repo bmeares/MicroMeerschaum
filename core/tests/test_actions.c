@@ -90,6 +90,13 @@ static void registration(void)
     const mm_action *pair[2];
     CHECK(mm_actions_init(&small, pair, 2));
     CHECK(!mm_actions_register(&small, &general));
+    mm_action custom = {"help", "?", NULL, capture, "legacy"};
+    CHECK(!mm_actions_init_with_help(&small, pair, 2, &general));
+    CHECK(mm_actions_init_with_help(&small, pair, 2, &custom));
+    mm_action_view other = mm_actions_local(&small);
+    mm_action_output_init(&out, reply, sizeof reply);
+    CHECK(dispatch(&other, "?", MM_ACTION_LITERAL) && !strcmp(reply, "legacy"));
+    CHECK(dispatch(&other, "show actions", MM_ACTION_LITERAL) && strstr(reply, "help (?)"));
     local = mm_actions_local(&registry);
     remote = mm_actions_remote(&registry, admitted, (void *)&check);
     mm_action_output_init(&out, reply, sizeof reply);

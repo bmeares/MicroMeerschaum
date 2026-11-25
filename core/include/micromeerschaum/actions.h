@@ -42,6 +42,10 @@ typedef struct {
  * immutable descriptors (including their strings) must outlive all uses.
  * Finish registration before concurrently reading the registry. */
 bool mm_actions_init(mm_actions *, const mm_action **slots, size_t capacity);
+/* Install the application's canonical "help" descriptor, including its alias
+ * and legacy reply. The standard "show actions" descriptor is also installed. */
+bool mm_actions_init_with_help(mm_actions *, const mm_action **slots, size_t capacity,
+                               const mm_action *help);
 bool mm_actions_register(mm_actions *, const mm_action *);
 
 /* This predicate sees the canonical descriptor even when an alias is used. */
@@ -50,6 +54,7 @@ struct mm_action_view {
     const mm_actions *registry;
     mm_action_admit_fn admit;
     void *user;
+    bool local;
 };
 mm_action_view mm_actions_local(const mm_actions *);
 mm_action_view mm_actions_remote(const mm_actions *, mm_action_admit_fn, void *user);
