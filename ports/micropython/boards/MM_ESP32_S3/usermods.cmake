@@ -1,0 +1,5 @@
+add_library(usermod_mmstorage INTERFACE)
+target_sources(usermod_mmstorage INTERFACE ${CMAKE_CURRENT_LIST_DIR}/mount.c)
+target_link_libraries(usermod_mmstorage INTERFACE idf::fatfs)
+target_link_libraries(usermod INTERFACE usermod_mmstorage)
+include("${CMAKE_CURRENT_LIST_DIR}/../../micropython.cmake")
