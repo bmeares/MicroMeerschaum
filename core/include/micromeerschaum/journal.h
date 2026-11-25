@@ -9,10 +9,9 @@
 extern "C" {
 #endif
 
-/* POSIX reference port. Provision one private, durably linked directory per
- * store. The handle holds an exclusive lock until closed. Serialize calls on
- * it. Memory is bounded per segment, with one descriptor per published run
- * and one interval per distinct coverage range. */
+/* Serialize operations on each handle. Memory includes at most one cached
+ * segment, one descriptor per published run and one interval per distinct
+ * coverage range. The volume port additionally bounds the number of slots. */
 typedef struct mm_journal mm_journal;
 
 typedef enum {
@@ -44,9 +43,23 @@ typedef struct {
 } mm_sample;
 
 /* create=true provisions an empty directory or reopens a matching store.
- * create=false requires a provisioned store. Never formats existing contents. */
+ * create=false requires a provisioned store. On ESP, this opens PIPE.MM in
+ * the supplied directory (16 active 4096-byte segments, keep-old). */
 mm_journal_status mm_journal_open(mm_journal **out, const char *directory,
                                   const mm_journal_config *config, bool create);
+typedef enum { MM_KEEP_OLD = 0, MM_KEEP_NEW = 1 } mm_retention;
+typedef struct {
+    uint16_t segments;       /* 2..64 active segments, plus a preallocated spare. */
+    uint32_t segment_bytes;  /* 512..1 MiB. One group must fit one segment. */
+    mm_retention retention;
+} mm_volume_options;
+
+/* A bounded journal in one preallocated file on a mounted LittleFS/FatFs
+ * volume or a POSIX host. Use one canonical path and serialize ownership on
+ * device. Geometry and retention are checked on reopen. */
+mm_journal_status mm_journal_open_volume(mm_journal **out, const char *path,
+                                         const mm_journal_config *config,
+                                         const mm_volume_options *options, bool create);
 void mm_journal_close(mm_journal *j);
 const mm_journal_config *mm_journal_config_get(const mm_journal *j);
 /* A failed/uncertain commit requires reopening before reading or issuing receipts. */
@@ -55,9 +68,15 @@ uint64_t mm_journal_prefix(const mm_journal *j);     /* Contiguous accounted-for
 uint64_t mm_journal_high(const mm_journal *j);       /* Highest allocated or received sequence. */
 uint64_t mm_journal_confirmed(const mm_journal *j);  /* Sender's durable receipt position. */
 
+/* Number of samples missed at admission awaiting a sequence-bearing loss
+ * record. Reclaim automatically attempts to materialize the counter. */
+uint64_t mm_journal_missed(const mm_journal *j);
+mm_journal_status mm_journal_flush_loss(mm_journal *j);
+
 /* One commit for the group. A newly attempted group returning UNCERTAIN sets
  * first_seq to its candidate identity. Reopen and reconcile before resuming.
- * Calls refused on an already uncertain handle set first_seq to zero. */
+ * When only overflow accounting was attempted, first_seq stays zero.
+ * Reopen and inspect pending loss before counting those samples again. */
 mm_journal_status mm_journal_append_group(mm_journal *j, const mm_sample *rows, size_t count,
                                           uint64_t *first_seq);
 mm_journal_status mm_journal_append(mm_journal *j, mm_kind kind, uint64_t mono_us, uint32_t boot,
@@ -70,6 +89,10 @@ mm_journal_status mm_journal_ingest(mm_journal *j, const uint8_t *records, size_
  * is covered by a loss declaration. TOO_SMALL sets *used to the required size. */
 mm_journal_status mm_journal_read(mm_journal *j, uint64_t seq, uint8_t *out,
                                   size_t cap, size_t *used);
+/* First retained record at or above from. NOT_FOUND when none remains. */
+mm_journal_status mm_journal_next(mm_journal *j, uint64_t from, uint64_t *seq);
+/* Select an original or the retained declaration accounting for a gap. */
+mm_journal_status mm_journal_delivery_start(mm_journal *j, uint64_t from, uint64_t *seq);
 /* Caller authenticates the issuer. Persist only a matching origin stream and
  * obligation, bounded by the highest locally allocated sequence. */
 mm_journal_status mm_journal_confirm(mm_journal *j, const mm_receipt *receipt);

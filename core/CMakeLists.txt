@@ -32,11 +32,11 @@ target_compile_definitions(test_document PRIVATE MM_VECTORS_DIR="${CMAKE_CURRENT
 
 if(UNIX)
     enable_language(CXX)
-    add_library(micromeerschaum_posix posix/journal.c posix/peer.c shared/sender.c)
+    add_library(micromeerschaum_posix storage/journal.c storage/volume.c posix/peer.c shared/sender.c)
     target_link_libraries(micromeerschaum_posix PUBLIC micromeerschaum)
     target_compile_options(micromeerschaum_posix PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Werror)
 
-    foreach(test journal delivery sender)
+    foreach(test journal delivery sender volume)
         add_executable(test_${test} tests/test_${test}.c)
         target_link_libraries(test_${test} PRIVATE micromeerschaum_posix)
         target_compile_options(test_${test} PRIVATE -Wall -Wextra -Wpedantic -Werror)

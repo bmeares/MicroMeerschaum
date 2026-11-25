@@ -22,11 +22,17 @@ mm_journal_status mm_peer_batch(mm_journal *origin, uint64_t after, uint32_t max
     const size_t max_records_bytes = MM_JOURNAL_SEGMENT_MAX - MM_SEGMENT_HEADER_MAX;
     if (cap - offset > max_records_bytes) cap = offset + max_records_bytes;
 
+    if (max_records && after < high) {
+        uint64_t start;
+        mm_journal_status st = mm_journal_delivery_start(origin, after + 1, &start);
+        if (st != MM_JOURNAL_OK) return st;
+        after = start - 1;
+    }
     while (after < high && batch.count < max_records) {
         size_t record_len = 0;
         mm_journal_status status = mm_journal_read(origin, after + 1, out + offset,
                                                    cap - offset, &record_len);
-        if (status == MM_JOURNAL_TOO_SMALL && batch.count) break;
+        if ((status == MM_JOURNAL_TOO_SMALL || status == MM_JOURNAL_NOT_FOUND) && batch.count) break;
         if (status != MM_JOURNAL_OK) return status;
         offset += record_len;
         batch.count++;

@@ -1,0 +1,28 @@
+menu "Storage example"
+
+config MM_EXAMPLE_SDMMC
+    bool "Use an SD card over one-bit SDMMC"
+    default n
+    help
+        Otherwise mount a preformatted on-board LittleFS storage partition.
+
+if MM_EXAMPLE_SDMMC
+config MM_EXAMPLE_SD_CLK
+    int "SD clock GPIO"
+    default 14
+config MM_EXAMPLE_SD_CMD
+    int "SD command GPIO"
+    default 15
+config MM_EXAMPLE_SD_D0
+    int "SD data 0 GPIO"
+    default 2
+endif
+
+config MM_EXAMPLE_PROVISION
+    bool "Allow the creation of this demo stream on fresh media"
+    default n
+    help
+        Use only for initial commissioning. Reopening an existing store
+        validates the Pipe, origin, generation and destination.
+
+endmenu
