@@ -115,13 +115,18 @@ mm_journal_status mm_volume_repair(mm_volume *v)
     return st;
 }
 
+static size_t checksum_offset(const uint8_t *page)
+{
+    return page[4] == 1 ? LEGACY_CHECKSUM : CHECKSUM;
+}
+
 static mm_journal_status checkpoint(mm_volume *v)
 {
     uint64_t epoch = mm_get64(v->manifest + 8);
     /* Once modifications to the RAM manifest start, any error requires reopen. */
     if (epoch == UINT64_MAX) return MM_JOURNAL_UNCERTAIN;
     mm_put64(v->manifest + 8, epoch + 1);
-    size_t crc_at = v->manifest[4] == 1 ? LEGACY_CHECKSUM : CHECKSUM;
+    size_t crc_at = checksum_offset(v->manifest);
     mm_put32(v->manifest + crc_at, mm_crc32(0, v->manifest, crc_at));
     v->page ^= 1u;
     mm_journal_status st = write_page(v, v->page);
@@ -137,7 +142,7 @@ static bool valid_page(const uint8_t *p)
 {
     if (memcmp(p, "MMJV", 4) || (p[4] != 1 && p[4] != 2) || p[5] || p[6] || p[7] ||
         !mm_get64(p + 8)) return false;
-    size_t crc_at = p[4] == 1 ? LEGACY_CHECKSUM : CHECKSUM;
+    size_t crc_at = checksum_offset(p);
     return mm_get32(p + crc_at) == mm_crc32(0, p, crc_at) &&
            (p[4] == 1 || mm_get32(p + ROUTE_START - 4) <= MM_ROUTE_BYTES);
 }
@@ -149,7 +154,7 @@ static mm_journal_status restore(mm_volume *v)
     if (st == MM_JOURNAL_OK) st = transfer(v, PAGE_STRIDE, second, NULL, PAGE_SIZE);
     if (st == MM_JOURNAL_OK) {
         bool a = valid_page(v->manifest), b = valid_page(second);
-        v->repair = !a || !b || memcmp(v->manifest, second, PAGE_SIZE) != 0;
+        v->repair = !a || !b || memcmp(v->manifest, second, checksum_offset(v->manifest) + 4) != 0;
         if (!a && !b) st = MM_JOURNAL_CORRUPT;
         else if (a && b && v->repair && mm_get64(v->manifest + 8) == mm_get64(second + 8))
             st = MM_JOURNAL_CORRUPT;
