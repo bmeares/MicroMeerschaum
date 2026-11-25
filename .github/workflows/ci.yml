@@ -33,6 +33,7 @@ jobs:
           repository: micropython/micropython
           ref: e0e9fbb17ed6fd06bb76e266ae554784c9c80804 # v1.28.0
           path: micropython
+      - run: git -C micropython apply --check "$GITHUB_WORKSPACE/ports/micropython/patches/v1.28.0-nimble-passkey.patch"
       - run: cmake -S core -B build -DMM_WITH_SQLITE=ON -DMM_SANITIZE=OFF
       - run: cmake --build build -j4 && ctest --test-dir build --output-on-failure
       - run: make -C micropython/ports/unix submodules
