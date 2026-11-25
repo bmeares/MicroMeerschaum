@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Authenticated Meerschaum batch routes and independent raw capture.
+mod device;
 mod replay;
 mod store;
 
@@ -168,12 +169,22 @@ impl Receiver {
 struct ReceiverPlugin;
 const SCOPE: &str = "mm:ingest";
 fn configured() -> Result<Receiver> {
-    Receiver::from_config(host::plugin_config()?)
-        .map_err(|_| Error::Message("Invalid mm_receiver configuration.".into()))
+    let mut config = host::plugin_config()?;
+    if config.is_null() {
+        config = host::config(&["plugins", "mm_receiver"])?;
+    }
+    Receiver::from_config(config).map_err(|_| {
+        Error::Message(
+            "Configure plugins.micro (or the legacy plugins.mm_receiver settings).".into(),
+        )
+    })
 }
 impl Plugin for ReceiverPlugin {
     fn manifest(&self) -> Value {
         Manifest::new()
+            .connector(ConnectorType::new("micro", device::METHODS.iter().copied()).instance())
+            .action("micro_shell", "Open the selected device shell.")
+            .action("micro_action", "Run one action on the selected device.")
             .api_route(
                 RouteSpec::new("ingest", "POST", "/micromeerschaum/v1/batch").scopes([SCOPE]),
             )
@@ -220,8 +231,10 @@ impl Plugin for ReceiverPlugin {
             Err(_) => RouteResponse::error(503, "Raw store unavailable."),
         })
     }
-    fn call(&self, request: &Request, _: Option<Frame>) -> Result<Reply> {
+    fn call(&self, request: &Request, data: Option<Frame>) -> Result<Reply> {
         match (request.method.as_str(), request.context["name"].as_str()) {
+            ("action", Some("micro_shell")) => device::action(request, true),
+            ("action", Some("micro_action")) => device::action(request, false),
             ("api_route", _) => meerschaum_plugin::sdk::call_server_extension(self, request),
             ("action", Some("mm_receiver_status")) => {
                 let rows = store::run(store::status(&configured()?.raw_store))
@@ -236,7 +249,16 @@ impl Plugin for ReceiverPlugin {
                 }))
             }
             ("action", Some("mm_receiver_init")) => {
-                configured()?
+                let receiver = configured()?;
+                // An API token can only read this plugin's section. Store a Meerschaum
+                // config reference so an upgraded deployment keeps following its old grants.
+                if host::plugin_config()?.is_null() {
+                    let installed = host::write_plugin_config(&json!("MRSM{plugins:mm_receiver}"))?;
+                    if !installed.success {
+                        return Err(Error::Message(installed.message));
+                    }
+                }
+                receiver
                     .initialize()
                     .map_err(|e| Error::Message(format!("{e:?}")))?;
                 Ok(Reply::json(json!([
@@ -244,6 +266,7 @@ impl Plugin for ReceiverPlugin {
                     "Initialized receiver raw store."
                 ])))
             }
+            _ if request.connector_type == "micro" => device::call(request, data),
             _ => Err(Error::Unsupported(request.method.clone())),
         }
     }
