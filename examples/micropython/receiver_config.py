@@ -31,7 +31,7 @@ def main():
             dtypes={"tick": "int", "celsius": "int"},
         )],
     }
-    print(json.dumps({"plugins": {"mm_receiver": receiver}}, indent=2))
+    print(json.dumps({"plugins": {"micro": receiver}}, indent=2))
 
 
 if __name__ == "__main__":

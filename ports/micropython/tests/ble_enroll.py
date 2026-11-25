@@ -7,6 +7,7 @@ class Radio:
     handlers = []
     replies = []
     settings = {}
+    stale = False
     def config(self, key=None, **kw):
         self.settings.update(kw)
         if key == "mac":
@@ -28,7 +29,14 @@ class Radio:
         assert self.settings["io"] == 0
         self.event(42, 3)  # Another connected, uncommissioned device.
         self.event(41, 2)  # Unexpected action.
-        self.event(41, 3)
+        del Connection._connected[41]
+        before = len(self.replies)
+        self.event(41, 3)  # Passkey requested before CONNECT registers the handle.
+        assert len(self.replies) == before
+        if self.stale:
+            for irq in self.handlers:
+                irq(2, (41, 0, b"abcdef"))  # Disconnect before registration.
+        Connection._connected[41] = conn
         conn.encrypted = conn.authenticated = conn.bonded = True
         return conn
 
@@ -95,4 +103,13 @@ except OSError:
     pass
 n = len(radio.replies)
 radio.event(41, 2)
+assert len(radio.replies) == n and radio.settings["io"] == 3
+
+# A disconnect cancels a deferred request even when the new peer reuses its handle.
+radio.stale = True
+try:
+    asyncio.run(enroll_receiver(peer, "012345"))
+    raise AssertionError("accepted a stale passkey request")
+except OSError:
+    pass
 assert len(radio.replies) == n and radio.settings["io"] == 3

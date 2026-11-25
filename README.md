@@ -8,12 +8,12 @@ A successful local `sync()` commits a reading on the device. The sender tracks d
 
 | Environment | Install and first result |
 | --- | --- |
-| **MicroPython** on ESP32-S3 with 8 MiB flash and 2 MiB quad PSRAM | Flash `micromeerschaum-0.1.0-ESP32-S3.bin`. Install a short Python source module, sample the on-chip temperature, then reboot and read the saved observation. [Firmware and first reading](docs/micropython.md) |
-| **Arduino-ESP32** | In Arduino IDE choose **Sketch → Include Library → Add .ZIP Library** and select `MicroMeerschaum-0.1.0.zip`. Open **File → Examples → MicroMeerschaum → LocalPipe** and run it on an ESP32-S3 with formatted LittleFS. The highest sequence increases on each boot. [CLI installation and peer retry sketch](docs/device-api.md#what-arduino-esp32-adds) |
+| **MicroPython** on ESP32-S3 with 8 MiB flash and 2 MiB quad PSRAM | Flash `micromeerschaum-0.2.0-ESP32-S3.bin`. Install a short Python source module, sample the on-chip temperature, then reboot and read the saved observation. [Firmware and first reading](docs/micropython.md) |
+| **Arduino-ESP32** | In Arduino IDE choose **Sketch → Include Library → Add .ZIP Library** and select `MicroMeerschaum-0.2.0.zip`. Open **File → Examples → MicroMeerschaum → LocalPipe** and run it on an ESP32-S3 with formatted LittleFS. The highest sequence increases on each boot. [CLI installation and peer retry sketch](docs/device-api.md#what-arduino-esp32-adds) |
 | **ESP-IDF** C/C++ | Add the component below to your project. Build the storage example to append two readings and verify the saved group after reopening. [Storage and provisioning](docs/device-storage.md#run-the-storage-example) · [Named Pipe API](docs/device-api.md#one-temperature-pipe-in-two-environments) |
-| **Meerschaum** 5.1.5 | Install `mm_receiver-0.1.0-linux-x86_64.tar.gz` on a compatible Linux host or build the native plugin from source. Configure the device grant and output Pipe. Use `mrsm mm receiver status` to inspect receipt and replay progress. [Receiver installation and configuration](receiver/plugin/README.md) |
+| **Meerschaum** 5.1.5–5.1.6 | Run `mrsm install plugins micro` with Cargo available, or install the prebuilt Linux x86-64 package. Discover a device with `mrsm show pipes -i micro:bench`, push or pull rows with ordinary Pipes, and open its action shell with `mrsm micro shell -i micro:bench`. [Host connector](docs/host-device.md) · [HTTPS receiver and upgrade](receiver/plugin/README.md) |
 
-Download the packages or the source archive for these examples from the [v0.1.0 release](https://github.com/bmeares/MicroMeerschaum/releases/tag/v0.1.0). The [qualification results](docs/qualification.md) distinguish host integration, emulated ESP32-S3 boots and the measurements to make on physical hardware.
+Download the packages or the source archive for these examples from the [v0.2.0 release](https://github.com/bmeares/MicroMeerschaum/releases/tag/v0.2.0). The [qualification results](docs/qualification.md) distinguish host integration, emulated ESP32-S3 boots and the measurements to make on physical hardware.
 
 ## Try a two-node sync on a POSIX host
 
@@ -48,14 +48,18 @@ print(temperature.progress())  # high includes the two new records
 
 For a source-driven Pipe, install a module implementing `fetch(pipe, **kw)` and call `Pipe("plugin:chip_sensor", "temperature").sync()` after provisioning. For indexed reads and corrections, choose the optional `sql:local` instance at registration. [MicroPython walkthrough](docs/micropython.md) · [On-device SQLite](docs/device-sqlite.md) · [HTTPS sender](docs/https-sender.md)
 
-Native projects can pin v0.1.0 in their component's `idf_component.yml` and include `micromeerschaum/pipe.h` or `micromeerschaum/pipe.hpp`.
+Native projects can pin v0.2.0 in their component's `idf_component.yml` and include `micromeerschaum/pipe.h` or `micromeerschaum/pipe.hpp`.
 
 ```yaml
 dependencies:
   micromeerschaum:
     git: https://github.com/bmeares/MicroMeerschaum.git
-    version: v0.1.0
+    version: v0.2.0
 ```
+
+## Run an action
+
+From a configured host, run `mrsm micro action show actions -i micro:bench` to see the actions that device exposes to your connection. Open `mrsm micro shell -i micro:bench` to use Tab completion and run several commands interactively. Applications can register their own actions alongside `show pipes`, `sync pipes` and `copy pipes`. [MicroPython actions and shell](docs/micropython-actions.md) · [ESP-IDF and Arduino actions](docs/native-actions.md) · [Host connection setup](docs/host-device.md)
 
 ## Build and test
 

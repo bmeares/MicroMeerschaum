@@ -1,25 +1,43 @@
-# Meerschaum receiver
+# MicroMeerschaum host plugin
 
-This native Meerschaum 5.1.5 plugin accepts authenticated binary batches and returns a destination receipt after the raw SQL transaction commits. A separate command materializes the retained document records into ordinary Pipes. SQLite and PostgreSQL are supported raw stores.
+The native `micro` plugin provides a device instance for the host CLI and Python API. [Connect an ordinary Pipe to a device](../../docs/host-device.md)
+
+Its receiver accepts authenticated binary batches and returns a destination receipt after the raw SQL transaction commits. A separate command materializes the retained document records into ordinary Pipes. SQLite and PostgreSQL are supported raw stores.
 
 ## Install
 
-On Linux x86-64 with glibc and Meerschaum 5.1.5 installed, download `mm_receiver-0.1.0-linux-x86_64.tar.gz` and extract it into the plugin directory used by the API and worker. The archive supplies `mm_receiver/plugin.toml` and `mm_receiver/libmm_receiver.so`. [Download the Linux plugin](https://github.com/bmeares/MicroMeerschaum/releases/download/v0.1.0/mm_receiver-0.1.0-linux-x86_64.tar.gz) · [Release source](https://github.com/bmeares/MicroMeerschaum/archive/refs/tags/v0.1.0.tar.gz)
+Install `micro` from the Meerschaum registry on the CLI host, API and worker as applicable. Use Meerschaum 5.1.5 or 5.1.6.
+
+```sh
+mrsm install plugins micro
+```
+
+Alternatively, on Linux x86-64 with glibc, extract the GitHub release archive into the plugin directory used by the API and worker. It supplies `micro/plugin.toml` and `micro/libmicro.so`. [Download the Linux plugin](https://github.com/bmeares/MicroMeerschaum/releases/download/v0.2.0/micro-0.2.0-linux-x86_64.tar.gz) · [Release source](https://github.com/bmeares/MicroMeerschaum/archive/refs/tags/v0.2.0.tar.gz)
 
 ```sh
 export MRSM_PLUGINS_DIR="${MRSM_PLUGINS_DIR:-$HOME/.config/meerschaum/plugins}"
 mkdir -p "$MRSM_PLUGINS_DIR"
-tar -xzf mm_receiver-0.1.0-linux-x86_64.tar.gz -C "$MRSM_PLUGINS_DIR"
+tar -xzf micro-0.2.0-linux-x86_64.tar.gz -C "$MRSM_PLUGINS_DIR"
 ```
+
+**Upgrading from `mm_receiver` 0.1.0.** Stop the API and its replay jobs. Move the old package outside every Meerschaum plugin directory. In the configuration used by the API and worker, rename the `plugins.mm_receiver` section to `plugins.micro`. Keep its contents, including any environment-variable references, database connection, grants and output mappings. For an environment-managed configuration, make the same key rename in the deployment source.
+
+```sh
+mrsm install plugins micro
+mrsm micro receiver init
+mrsm micro receiver status
+```
+
+Restart the API and update any scheduled replay command to `mrsm micro receiver replay`. The previous plugin and configuration key can now be removed. The receiver opens the existing raw database and checkpoints. The device upload URLs and token scope stay the same.
 
 To build your own native library, unpack the release source on the host OS and architecture that runs the API. Build the plugin with Rust using its locked dependencies. The release toolchain is Rust 1.99.0. The following install commands assume Linux.
 
 ```sh
 cargo build --manifest-path receiver/plugin/Cargo.toml --release --locked
 export MRSM_PLUGINS_DIR="${MRSM_PLUGINS_DIR:-$HOME/.config/meerschaum/plugins}"
-install -d "$MRSM_PLUGINS_DIR/mm_receiver"
-install -m 755 receiver/plugin/target/release/libmm_receiver.so "$MRSM_PLUGINS_DIR/mm_receiver/"
-install -m 644 receiver/plugin/plugin.toml "$MRSM_PLUGINS_DIR/mm_receiver/"
+install -d "$MRSM_PLUGINS_DIR/micro"
+install -m 755 receiver/plugin/target/release/libmicro.so "$MRSM_PLUGINS_DIR/micro/"
+install -m 644 receiver/plugin/plugin.toml "$MRSM_PLUGINS_DIR/micro/"
 ```
 
 Use the same plugin directory and settings for the API and worker. For the onboard ESP32-S3 reading, keep the `device_identity.py` generated during board provisioning on the operator's computer. Grant the device owner the custom scope `mm:ingest` and issue a token with that scope. The API credential goes on the device. Use its public token ID in the receiver grant. [First reading](../../docs/micropython.md#collect-your-first-reading)
@@ -32,13 +50,13 @@ python3 examples/micropython/receiver_config.py "$TOKEN_ID" "$RAW_STORE" \
     --identity device_identity.py --instance sql:local > receiver-config.json
 ```
 
-The generated `plugins.mm_receiver` settings use this board's exact origin, generation and destination, quoted to preserve 64-bit precision. They grant the `plugin:chip_sensor` / `temperature` stream and map integer `tick` and `celsius` fields into the ordinary `weather` / `chip_temperature` Pipe. Give a relay its own token and grants for the origins it forwards. For additional devices, extend the grants and outputs and assign each stream its own output Pipe. [Configuration generator](../../examples/micropython/receiver_config.py)
+The generated receiver settings use this board's exact origin, generation and destination, quoted to preserve 64-bit precision. They grant the `plugin:chip_sensor` / `temperature` stream and map integer `tick` and `celsius` fields into the ordinary `weather` / `chip_temperature` Pipe. Give a relay its own token and grants for the origins it forwards. For additional devices, extend the grants and outputs and assign each stream its own output Pipe. [Configuration generator](../../examples/micropython/receiver_config.py)
 
 Copy `receiver-config.json` to the receiver host. Initialize storage, then start or restart the API with the deployment's TLS certificate and key.
 
 ```sh
 export MRSM_CONFIG="$(cat receiver-config.json)"
-mrsm mm receiver init
+mrsm micro receiver init
 mrsm start api --certfile "$TLS_CERT" --keyfile "$TLS_KEY"
 ```
 
@@ -52,13 +70,13 @@ To import a v0 batch, explicitly set `"legacy": true` on its grant and send to `
 
 ## Replay
 
-Run `mrsm mm receiver replay` once or schedule it through a Meerschaum job. Each output entry chooses the document parser and maps one exact v1 stream generation into a dedicated ordinary Pipe. Leave a binary stream without an output to retain it for a sensor-specific reader. A single source can have several separately keyed outputs. Set an optional `location` for each destination Pipe; omitting it selects the default location.
+Run `mrsm micro receiver replay` once or schedule it through a Meerschaum job. Each output entry chooses the document parser and maps one exact v1 stream generation into a dedicated ordinary Pipe. Leave a binary stream without an output to retain it for a sensor-specific reader. A single source can have several separately keyed outputs. Set an optional `location` for each destination Pipe; omitting it selects the default location.
 
 Declare the fields with `int`, `bool`, `float`, `string`, or `datetime`. Typed time fields carry signed Unix microseconds UTC. Each row must include all configured key columns with non-null values. The worker provisions a keyed upsert Pipe on its first write. A pre-existing Pipe must have matching keys and upsert enabled. Reserve each target for its mapped stream so independent origins and generations retain independent row identities. [Document encoding](../../spec/document-v1.md)
 
 The worker applies one original sequence at a time through the durable prefix. A failed or locked write leaves the checkpoint before that sequence. If the worker stops after publishing a row and before saving the checkpoint, it repeats the same keyed upsert on restart. A late original inside an earlier declared eviction rewinds the affected output checkpoints and reapplies subsequent corrections in source order.
 
-`mrsm mm receiver status` reports the raw prefix, retained record count, observed route-range count, and per-output applied checkpoints. An output acquires a checkpoint after its first successful step. Read materialized rows through the ordinary Pipe API.
+`mrsm micro receiver status` reports the raw prefix, retained record count, observed route-range count, and per-output applied checkpoints. An output acquires a checkpoint after its first successful step. Read materialized rows through the ordinary Pipe API.
 
 ```python
 import meerschaum as mrsm
@@ -72,8 +90,8 @@ print(pipe.get_docs(limit=10))
 With Python, `mrsm` 5.1.5 and OpenSSL available, run these from the repository root. The second command starts and removes a disposable PostgreSQL 18 Docker container. Both runs install a freshly built library into a temporary Meerschaum root, provision scoped tokens, serve TLS on loopback and validate the server certificate.
 
 ```sh
-python receiver/plugin/tests/deployment.py --library receiver/plugin/target/release/libmm_receiver.so
-python receiver/plugin/tests/deployment.py --library receiver/plugin/target/release/libmm_receiver.so --postgres
+python receiver/plugin/tests/deployment.py --library receiver/plugin/target/release/libmicro.so
+python receiver/plugin/tests/deployment.py --library receiver/plugin/target/release/libmicro.so --postgres
 ```
 
 Add `--micropython /path/to/mm-unix/micropython` to exercise the first-reading application and generated configuration with the Unix MicroPython binding, a simulated integer temperature sensor, a live TLS upload and a read from the ordinary Pipe.

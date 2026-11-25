@@ -329,10 +329,32 @@ class Pipe:
         """Copy pending original records to a compatible provisioned peer Pipe."""
         return self.deliver(instance)
 
+    def _retained_docs(self, limit, record_limit):
+        store = self._config().store
+        seq = 1
+        while limit and seq < 1 << 64:
+            item = store.next_record(seq, record_limit)
+            if item is None:
+                return
+            seq, record = item
+            seq += 1
+            if record[3] == 0:
+                yield _mm.decode(memoryview(record)[32:])
+                limit -= 1
+
     def get_docs(self, begin=None, end=None, params=None, limit=100):
-        """Return up to limit current SQLite rows in the half-open axis interval."""
-        return self._config().store.docs(begin, end, params, limit)
+        """Read current SQLite rows or the oldest retained journal documents."""
+        if self.instance_keys == "sql:local":
+            return self._config().store.docs(begin, end, params, limit)
+        if type(limit) is not int or not 0 <= limit <= 1024:
+            raise ValueError("invalid read limit")
+        if begin is not None or end is not None or params not in (None, {}):
+            raise ValueError("journal reads support limit only")
+        return list(self._retained_docs(limit, 1 << 20))
 
     def get_sync_time(self, params=None):
         """Latest matching SQLite axis value, as integer ticks or Unix microseconds."""
         return self._config().store.sync_time(params)
+
+
+from mm_actions import ActionRegistry, default_actions, make_action, expose, unexpose, dispatch, complete, shell

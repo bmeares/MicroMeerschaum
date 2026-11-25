@@ -309,6 +309,26 @@ static mp_obj_t read_record(mp_obj_t self, mp_obj_t seq_obj) {
 }
 static MP_DEFINE_CONST_FUN_OBJ_2(read_obj, read_record);
 
+/* Use the retained index to skip reclaimed ranges and holes in receiver volumes. */
+static mp_obj_t next_record(mp_obj_t self, mp_obj_t from_obj, mp_obj_t cap_obj) {
+    mm_journal *j = store(self);
+    uint64_t seq;
+    size_t len;
+    uint32_t cap = bounded(cap_obj, MM_JOURNAL_SEGMENT_MAX);
+    mm_journal_status status = mm_journal_next(j, integer_bits(from_obj, false), &seq);
+    if (status == MM_JOURNAL_NOT_FOUND) return mp_const_none;
+    check(status);
+    status = mm_journal_read(j, seq, NULL, 0, &len);
+    if (status != MM_JOURNAL_TOO_SMALL) check(status);
+    if (len > cap) mp_raise_ValueError(MP_ERROR_TEXT("record exceeds read budget"));
+    vstr_t buf;
+    vstr_init_len(&buf, len);
+    check(mm_journal_read(j, seq, (uint8_t *)buf.buf, len, &len));
+    mp_obj_t item[] = {mp_obj_new_int_from_ull(seq), mp_obj_new_bytes_from_vstr(&buf)};
+    return mp_obj_new_tuple(2, item);
+}
+static MP_DEFINE_CONST_FUN_OBJ_3(next_record_obj, next_record);
+
 static mp_obj_t reclaim(mp_obj_t self) {
     check(mm_journal_reclaim(store(self)));
     return mp_const_none;
@@ -322,6 +342,7 @@ static const mp_rom_map_elem_t methods[] = {
     {MP_ROM_QSTR(MP_QSTR_receive), MP_ROM_PTR(&receive_obj)},
     {MP_ROM_QSTR(MP_QSTR_confirm), MP_ROM_PTR(&confirm_obj)},
     {MP_ROM_QSTR(MP_QSTR_read_record), MP_ROM_PTR(&read_obj)},
+    {MP_ROM_QSTR(MP_QSTR_next_record), MP_ROM_PTR(&next_record_obj)},
     {MP_ROM_QSTR(MP_QSTR_routes), MP_ROM_PTR(&routes_obj)},
     {MP_ROM_QSTR(MP_QSTR_reclaim), MP_ROM_PTR(&reclaim_obj)},
     {MP_ROM_QSTR(MP_QSTR_close), MP_ROM_PTR(&close_obj)},

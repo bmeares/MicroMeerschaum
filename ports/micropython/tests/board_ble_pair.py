@@ -74,7 +74,7 @@ class Board:
         self.log = self.files.enter_context((workdir / (self.name + ".emu.log")).open("wb"))
         self.transcript = self.files.enter_context((workdir / (self.name + ".uart.log")).open("wb"))
 
-    async def start(self):
+    async def boot(self):
         self.transport = await open_transport(f"tcp-server:127.0.0.1:{self.hci}")
         self.controller = Controller(
             self.name,
@@ -138,6 +138,9 @@ class Board:
                 await asyncio.sleep(0.11)
         else:
             raise RuntimeError("no UART")
+
+    async def start(self):
+        await self.boot()
         self.write.write(b"\r")
         await self.until(b">>> ")
         self.write.write(b"\x01")
@@ -251,6 +254,9 @@ print('IDENTITY', identity_address())
             src.execute(f"other=aioble.Device(0,{sink.address!r})"),
             sink.execute(f"other=aioble.Device(0,{src.address!r})"),
         )
+        if args.management:
+            import management_pair
+            await management_pair.before_enrollment(sink, src, exchange_window)
         code = f"{secrets.randbelow(1000000):06d}"
         issued = await exchange_window(
             sink,
@@ -263,6 +269,10 @@ print('IDENTITY', identity_address())
             assert b"ENCRYPTION (1, 1, 1, 16)" in report
             assert b"ENROLLED" in report
         print("Authenticated enrollment finished on both devices", flush=True)
+        if args.management:
+            await management_pair.after_enrollment(sink, src, exchange_window)
+            print("PASS: bonded management GATT, fragmented reads/writes and action admission", flush=True)
+            return
         doc = {"temperature": 19, "tick": 21, "probe": "A1"}
         seed, _ = await asyncio.gather(
             src.execute(
@@ -316,6 +326,7 @@ print('SOURCE CONFIRMED',pipe.progress())
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=Path)
+    parser.add_argument("--management", action="store_true", help="exercise the management GATT service")
     parser.add_argument(
         "--elf",
         required=True,

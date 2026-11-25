@@ -28,8 +28,13 @@ _DISPLAY = 3
 
 
 def _passkey_irq(event, data):
-    if event == 31 and _enrollment is not None:  # _IRQ_PASSKEY_ACTION
+    if _enrollment is None:
+        return
+    if event == 31:  # _IRQ_PASSKEY_ACTION
         _enrollment.respond(*data)
+    elif event in (2, 8) and _enrollment.pending == data[0]:
+        # A later connection may reuse this handle.
+        _enrollment.pending = None
 
 
 class _Enrollment:
@@ -40,6 +45,7 @@ class _Enrollment:
         self.code = int(code)
         self.action = action
         self.connection = None
+        self.pending = None
         self.io = 0 if action == _DISPLAY else 2  # DisplayOnly or KeyboardOnly.
 
     def __enter__(self):
@@ -58,11 +64,22 @@ class _Enrollment:
     def respond(self, handle, action, _number):
         from aioble.core import ble
         from aioble.device import DeviceConnection
+        if action != self.action or self.connection is not None:
+            return
         conn = DeviceConnection._connected.get(handle)
-        if (action == self.action and self.connection is None and conn is not None
-                and conn.is_connected() and conn.device == self.device):
+        if conn is None:
+            # NimBLE can request the passkey before aioble receives CONNECT.
+            # Defer supplying it until advertise/connect returns the verified peer.
+            self.pending = handle
+        elif conn.is_connected() and conn.device == self.device:
+            self.pending = None
             self.connection = conn
             ble.gap_passkey(handle, action, self.code)
+
+    def connected(self, conn):
+        if conn._conn_handle is not None and self.pending == conn._conn_handle:
+            self.pending = None
+            self.respond(conn._conn_handle, self.action, None)
 
     def verify(self, conn):
         if self.connection is not conn or not (conn.encrypted and conn.authenticated and conn.bonded):
@@ -72,7 +89,7 @@ class _Enrollment:
         global _enrollment
         import aioble
         _enrollment = None
-        self.code = self.connection = None
+        self.code = self.connection = self.pending = None
         aioble.config(bond=True, le_secure=True, mitm=True, io=3)
 
 
@@ -84,6 +101,7 @@ async def enroll_receiver(device, code):
         async with await aioble.advertise(100000, name=b"MM-enroll", timeout_ms=60000) as conn:
             if conn.device != device:
                 raise OSError("unexpected commissioning peer")
+            enrollment.connected(conn)
             with conn.timeout(30000):
                 while not conn.encrypted:
                     await asyncio.sleep_ms(20)
@@ -94,6 +112,7 @@ async def enroll_sender(device, code):
     """Connect to one expected peripheral and enter its out-of-band passkey."""
     with _Enrollment(device, code, _INPUT) as enrollment:
         async with await device.connect() as conn:
+            enrollment.connected(conn)
             await conn.pair(bond=True, le_secure=True, mitm=True, io=enrollment.io)
             enrollment.verify(conn)
             await conn.disconnected(timeout_ms=30000)

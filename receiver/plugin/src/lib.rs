@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Authenticated Meerschaum batch routes and independent raw capture.
+mod device;
 mod replay;
 mod store;
 
@@ -169,11 +170,18 @@ struct ReceiverPlugin;
 const SCOPE: &str = "mm:ingest";
 fn configured() -> Result<Receiver> {
     Receiver::from_config(host::plugin_config()?)
-        .map_err(|_| Error::Message("Invalid mm_receiver configuration.".into()))
+        .map_err(|_| Error::Message("Configure the receiver in plugins.micro.".into()))
 }
 impl Plugin for ReceiverPlugin {
     fn manifest(&self) -> Value {
         Manifest::new()
+            .connector(ConnectorType::new("micro", device::METHODS.iter().copied()).instance())
+            .action("micro_shell", "Open the selected device shell.")
+            .action("micro_action", "Run one action on the selected device.")
+            .action(
+                "micro_reconcile",
+                "Permit a new write after inspecting an unresolved device Pipe.",
+            )
             .api_route(
                 RouteSpec::new("ingest", "POST", "/micromeerschaum/v1/batch").scopes([SCOPE]),
             )
@@ -181,14 +189,17 @@ impl Plugin for ReceiverPlugin {
                 RouteSpec::new("legacy", "POST", "/micromeerschaum/v0/batch").scopes([SCOPE]),
             )
             .action(
-                "mm_receiver_status",
+                "micro_receiver_status",
                 "Show raw delivery prefixes, route counts and applied checkpoints.",
             )
             .action(
-                "mm_receiver_replay",
+                "micro_receiver_replay",
                 "Publish the durable prefix to configured ordinary Pipes.",
             )
-            .action("mm_receiver_init", "Initialize the configured raw store.")
+            .action(
+                "micro_receiver_init",
+                "Initialize the configured raw store.",
+            )
             .into()
     }
     fn api_route(&self, request: &RouteRequest) -> Result<RouteResponse> {
@@ -220,23 +231,27 @@ impl Plugin for ReceiverPlugin {
             Err(_) => RouteResponse::error(503, "Raw store unavailable."),
         })
     }
-    fn call(&self, request: &Request, _: Option<Frame>) -> Result<Reply> {
+    fn call(&self, request: &Request, data: Option<Frame>) -> Result<Reply> {
         match (request.method.as_str(), request.context["name"].as_str()) {
+            ("action", Some(command @ ("micro_shell" | "micro_action" | "micro_reconcile"))) => {
+                device::action(request, command)
+            }
             ("api_route", _) => meerschaum_plugin::sdk::call_server_extension(self, request),
-            ("action", Some("mm_receiver_status")) => {
+            ("action", Some("micro_receiver_status")) => {
                 let rows = store::run(store::status(&configured()?.raw_store))
                     .map_err(|e| Error::Message(format!("{e:?}")))?;
                 Ok(Reply::json(json!([true, json!(rows).to_string()])))
             }
-            ("action", Some("mm_receiver_replay")) => {
+            ("action", Some("micro_receiver_replay")) => {
                 let result = configured()?.replay();
                 Ok(Reply::json(match result {
                     Ok(()) => json!([true, "Replayed receiver outputs."]),
                     Err(error) => json!([false, format!("Replay stopped: {error:?}")]),
                 }))
             }
-            ("action", Some("mm_receiver_init")) => {
-                configured()?
+            ("action", Some("micro_receiver_init")) => {
+                let receiver = configured()?;
+                receiver
                     .initialize()
                     .map_err(|e| Error::Message(format!("{e:?}")))?;
                 Ok(Reply::json(json!([
@@ -244,6 +259,7 @@ impl Plugin for ReceiverPlugin {
                     "Initialized receiver raw store."
                 ])))
             }
+            _ if request.connector_type == "micro" => device::call(request, data),
             _ => Err(Error::Unsupported(request.method.clone())),
         }
     }

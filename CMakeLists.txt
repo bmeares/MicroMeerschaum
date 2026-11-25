@@ -6,9 +6,10 @@ endif()
 idf_component_register(
     SRCS "core/src/crc32.c" "core/src/wire.c" "core/src/record.c" "core/src/segment.c" "core/src/batch.c"
          "core/src/protocol.c" "core/src/document.c" "core/src/pipe.c" "core/src/gatt.c"
+         "core/src/actions.c" "core/src/action_shell.c" "core/src/pipe_actions.c"
          "core/storage/journal.c" "core/storage/volume.c" "core/posix/peer.c" "core/shared/sender.c"
     INCLUDE_DIRS "core/include"
-    PRIV_REQUIRES esp_http_client mbedtls esp_hw_support esp_rom pthread bt
+    PRIV_REQUIRES json esp_http_client mbedtls esp_hw_support esp_rom pthread bt
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
 
@@ -25,4 +26,12 @@ endif()
 
 if(CONFIG_MICROMEERSCHAUM_NIMBLE)
     target_sources(${COMPONENT_LIB} PRIVATE "ports/esp-idf/nimble.c")
+endif()
+
+if(CONFIG_MICROMEERSCHAUM_DEVICE_SESSION)
+    target_sources(${COMPONENT_LIB} PRIVATE "ports/esp-idf/device_session.c")
+endif()
+
+if(CONFIG_MICROMEERSCHAUM_SESSION_GATT)
+    target_sources(${COMPONENT_LIB} PRIVATE "ports/esp-idf/session_gatt.c")
 endif()
