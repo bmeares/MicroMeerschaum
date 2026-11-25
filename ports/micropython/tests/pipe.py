@@ -113,9 +113,10 @@ dest.close()
 p = origin()
 dest = receiver()
 provision_peer("peer:greenhouse", 2, exchange)
+pending = p.read_record(14)
 assert remote.deliver()[0]
 assert p.progress()["confirmed"] == 14 and dest.progress()["high"] == 14
-assert dest.read_record(14) == p.read_record(14)
+assert dest.read_record(14) == pending
 p.reclaim()
 assert p.progress()["high"] == 14
 print("provisioned peer copy, direct sync, lost reply and reboot")
@@ -171,3 +172,47 @@ a.close()
 b.close()
 c.close()
 print("custody transfer and authenticated route evidence")
+
+# Reuse a two-segment staging journal for direct writes and larger frames.
+stage = provision("sensor", "staged", root + "/staging.mm", 1, 5, 2,
+                  segments=2, create=True)
+target = provision("sensor", "staged", root + "/target.mm", 1, 5, 2,
+                   instance="journal:target", receiver=True, segments=64, create=True)
+def accept(packet):
+    return target.receive(1, packet)
+for name in ("peer:near", "api:far"):
+    provision_peer(name, 2, accept)
+    direct = Pipe("sensor", "staged", instance=name)
+    for tick in range(4):
+        ok, message = direct.sync({"tick": tick})
+        assert ok, message
+    ok, message = direct.sync(({"tick": tick} for tick in range(24)))
+    assert ok and direct.confirmed_input == direct.staged_input == 24, message
+assert stage.progress()["confirmed"] == 56 and stage.progress()["missed"] == 0
+
+def disconnected(packet):
+    raise OSError("offline")
+provision_peer("api:far", 2, disconnected)
+ok, message = direct.sync(({"tick": tick} for tick in range(24)))
+assert not ok and direct.staged_input == 16 and direct.confirmed_input == 0, message
+assert stage.progress()["missed"] == 8
+provision_peer("api:far", 2, accept)
+assert direct.sync({"tick": 999})[0]  # Reconnect with a full pending journal.
+assert target.read_doc(target.progress()["high"]) == {"tick": 999}
+first = stage.progress()["high"] + 1
+sent = []
+def partial(packet):
+    receipt = accept(packet)
+    sent.append(1)
+    if len(sent) == 2:
+        raise OSError("lost reply")
+    return receipt
+provision_peer("api:far", 2, partial, max_records=1)
+ok, message = direct.sync({"tick": [60, 61, 62]})
+assert not ok and direct.confirmed_input == 1 and direct.staged_input == 3, message
+assert stage.read_doc(first + 1) == target.read_doc(first + 1) == {"tick": 61}
+provision_peer("api:far", 2, accept)
+assert direct.deliver()[0]
+assert target.read_doc(first + 2) == {"tick": 62}
+stage.close()
+target.close()

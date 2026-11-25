@@ -108,7 +108,7 @@ remote = Pipe("sensor", "temperature", instance="peer:greenhouse")
 ok, message = remote.sync({"tick": 43, "celsius": 21.9})
 ```
 
-A direct peer Pipe stages the rows in its matching default keep-old journal and succeeds after the destination acknowledges them. If the peer is offline or a reply is lost, `remote.staged_input` reports the durable local input count and `remote.confirmed_input` reports the confirmed remote input count. Call `remote.deliver()` after reconnecting to retry those identities. `pipe.copy_to()` requires a compatible, provisioned destination. It preserves original records and tracks the receiver's receipt. A sleeping peer never prevents a local journal Pipe from accepting supplied observations within its storage budget.
+A direct peer or API Pipe stages each group in its matching default keep-old journal, sends pending records, and reclaims fully acknowledged segments for subsequent groups. A successful direct sync confirms all its input at the destination. If the peer is offline or a reply is lost, `remote.staged_input` reports the durable local input count and `remote.confirmed_input` reports the confirmed remote input count. Call `remote.deliver()` after reconnecting to retry those identities. `pipe.copy_to()` requires a compatible, provisioned destination. It preserves original records and tracks the receiver's receipt. A sleeping peer never prevents a local journal Pipe from accepting supplied observations within its storage budget.
 
 ## Query local rows with SQLite
 

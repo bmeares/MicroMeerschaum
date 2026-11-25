@@ -33,6 +33,11 @@ client = mm_https.open(url, token)
 try:
     provision_peer("api:site", destination_id, client.exchange)
     ok, message = pipe.copy_to("api:site")
+    pipe.reclaim()  # Make room for the next collection window.
+    if not ok:
+        raise OSError(message)
 finally:
     client.close()
 ```
+
+The local journal releases whole segments through the last verified receipt. If the transport fails partway through a copy, the next window retries the remaining records.
