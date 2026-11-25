@@ -92,6 +92,14 @@ async def run(args, directory):
                 pass
             else:
                 raise AssertionError("unpaired write passed")
+            await tx.discover_descriptors()
+            cccd = tx.get_descriptor(UUID.from_16_bits(0x2902))
+            try:
+                await cccd.write_value(b"\x01\x00", with_response=True)
+            except ATT_Error:
+                pass
+            else:
+                raise AssertionError("unpaired notification subscription passed")
             await asyncio.wait_for(conn.pair(), 90)
             await tx.discover_descriptors()
             packets = asyncio.Queue()

@@ -131,7 +131,8 @@ static int receive(uint16_t conn, uint16_t handle, struct ble_gatt_access_ctxt *
 static const struct ble_gatt_chr_def chars[] = {
     {.uuid = &rx_id.u, .access_cb = receive,
      .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_WRITE_AUTHEN},
-    {.uuid = &tx_id.u, .access_cb = receive, .val_handle = &tx_handle, .flags = BLE_GATT_CHR_F_NOTIFY},
+    {.uuid = &tx_id.u, .access_cb = receive, .val_handle = &tx_handle,
+     .flags = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC | BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN},
     {0}
 };
 static const struct ble_gatt_svc_def services[] = {
