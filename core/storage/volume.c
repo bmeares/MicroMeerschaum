@@ -194,7 +194,8 @@ static mm_journal_status sync_parent(const char *path)
     char *directory = strdup(path);
     if (!directory) return MM_JOURNAL_NOMEM;
     char *slash = strrchr(directory, '/');
-    if (slash) slash[slash == directory ? 1 : 0] = 0;
+    if (slash == directory) directory[1] = 0;
+    else if (slash) *slash = 0;
     int fd = open(slash ? directory : ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     free(directory);
     if (fd < 0) return MM_JOURNAL_IO;
@@ -356,8 +357,9 @@ mm_journal_status mm_volume_publish(mm_volume *v, seq_range range, const uint8_t
     off_t at = slot_offset(v, free_slot);
     mm_journal_status st = transfer(v, at, NULL, header, h);
     if (st == MM_JOURNAL_OK) st = transfer(v, at + (off_t)h, NULL, records, n);
-    if (st != MM_JOURNAL_OK) return st;
-    if (barrier(v) < 0) return MM_JOURNAL_UNCERTAIN;
+    /* A physical write failure may put the VFS descriptor into an error
+     * state. Reopen before issuing another write, even to the loss reserve. */
+    if (st != MM_JOURNAL_OK || barrier(v) < 0) return MM_JOURNAL_UNCERTAIN;
     trim(v, remove_through);
     uint8_t *e = entry(v->manifest, free_slot);
     mm_put64(e, range.first);
