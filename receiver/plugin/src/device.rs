@@ -7,11 +7,16 @@ use meerschaum_plugin::{
 use serde::Deserialize;
 use std::{
     collections::{BTreeSet, HashSet},
+    io::{BufRead, BufReader, Write},
     process::{Command, Stdio},
     sync::Mutex,
 };
 
-const TRANSPORT: &str = include_str!("transport.py");
+const TRANSPORT: &str = concat!(
+    include_str!("write_guard.py"),
+    "\n",
+    include_str!("transport.py")
+);
 const SHELL: &str = include_str!("shell.py");
 const MAX_ROWS: usize = 128;
 const MAX_CATALOG: usize = 4096;
@@ -53,23 +58,46 @@ fn exchange(config: &Value, request: Value) -> Result<Value> {
         .stdout(Stdio::piped())
         .spawn()
         .map_err(error)?;
-    let written = serde_json::to_writer(
-        child.stdin.take().expect("piped stdin"),
-        &json!({"config":config, "request":request}),
-    );
-    let reply = child.wait_with_output().map_err(error)?;
-    written.map_err(error)?;
-    let response: Value = serde_json::from_slice(&reply.stdout)
-        .map_err(|_| error("Device transport closed without a result. Any sent action or write has an unknown outcome."))?;
-    if response["ok"] == true && reply.status.success() {
+    let mut input = child.stdin.take().expect("piped stdin");
+    let output = child.stdout.take().expect("piped stdout");
+    let write = request["op"] == "write";
+    let result = (|| -> Result<Value> {
+        serde_json::to_writer(&mut input, &json!({"config":config, "request":request}))
+            .map_err(error)?;
+        writeln!(input).map_err(error)?;
+        let mut reader = BufReader::new(output);
+        let mut read_reply = || -> Option<Value> {
+            let mut line = String::new();
+            reader.read_line(&mut line).ok()?;
+            serde_json::from_str(&line).ok()
+        };
+        let mut response = read_reply().ok_or_else(|| error(
+            "Device transport closed without a result. Any sent action or write has an unknown outcome."
+        ))?;
+        if write && let Some(pending) = response["pending"].as_str() {
+            response = read_reply().ok_or_else(|| error(pending))?;
+        }
+        if response["ok"] != true {
+            return Err(error(
+                response["error"]
+                    .as_str()
+                    .unwrap_or("Invalid device transport result."),
+            ));
+        }
+        if write {
+            if !response["data"].is_string() {
+                return Err(error(
+                    "Outcome unknown after sending write: invalid acknowledgement.",
+                ));
+            }
+            // A lost acknowledgement leaves the write guarded. Its device result is already known.
+            let _ = writeln!(input, "ack");
+        }
         Ok(response["data"].clone())
-    } else {
-        Err(error(
-            response["error"]
-                .as_str()
-                .unwrap_or("Invalid device transport result."),
-        ))
-    }
+    })();
+    drop(input);
+    let _ = child.wait();
+    result
 }
 
 type Key = (String, String, Option<String>);
@@ -275,7 +303,8 @@ fn frame(rows: Vec<Value>, query: &Value) -> Result<Frame> {
     Frame::from_rows(rows, &dtypes)
 }
 
-fn write(config: &Value, key: &Key, data: Option<Frame>) -> Result<Value> {
+fn write(req: &Request, key: &Key, data: Option<Frame>) -> Result<Value> {
+    let config = &req.config;
     if !catalog(config)?
         .iter()
         .any(|entry| &entry.key == key && entry.write)
@@ -297,7 +326,9 @@ fn write(config: &Value, key: &Key, data: Option<Frame>) -> Result<Value> {
             }
         }
     }
-    let message = exchange(config, json!({"op":"write","key":key,"rows":rows}))?;
+    let mut settings = config.clone();
+    settings["_micro_label"] = json!(req.label);
+    let message = exchange(&settings, json!({"op":"write","key":key,"rows":rows}))?;
     Ok(json!([
         true,
         message
@@ -343,7 +374,7 @@ pub(crate) fn call(req: &Request, data: Option<Frame>) -> Result<Reply> {
         // A device does not publish an indexed datetime axis or a fixed schema.
         "get_sync_time" => Ok(Reply::json(Value::Null)),
         "get_pipe_columns_types" => Ok(Reply::json(json!({}))),
-        "sync_pipe" => Ok(Reply::json(match write(config, &key, data) {
+        "sync_pipe" => Ok(Reply::json(match write(req, &key, data) {
             Ok(reply) => reply,
             Err(reason) => json!([false, reason.to_string()]),
         })),
@@ -359,7 +390,7 @@ pub(crate) fn call(req: &Request, data: Option<Frame>) -> Result<Reply> {
     }
 }
 
-pub(crate) fn action(request: &Request, interactive: bool) -> Result<Reply> {
+pub(crate) fn action(request: &Request, command: &str) -> Result<Reply> {
     let kw = &request.context["kwargs"];
     let instance = if let Some(s) = kw["mrsm_instance"].as_str() {
         s.to_string()
@@ -385,7 +416,16 @@ pub(crate) fn action(request: &Request, interactive: bool) -> Result<Reply> {
         .flatten()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
-    if interactive && args.is_empty() {
+    if command == "micro_reconcile" {
+        let [token] = args.as_slice() else {
+            return Err(error(
+                "Supply the recovery token from the unresolved write.",
+            ));
+        };
+        let message = exchange(&config, json!({"op":"reconcile","token":token}))?;
+        return Ok(Reply::json(json!([true, message])));
+    }
+    if command == "micro_shell" && args.is_empty() {
         let mut child = python(&config);
         // Keep operator I/O on the CLI's terminal. The transport module lives only inside the library.
         let script = format!("__name__ = 'micro_transport'\n{TRANSPORT}\n{SHELL}");

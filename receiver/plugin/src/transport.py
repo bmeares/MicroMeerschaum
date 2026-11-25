@@ -18,6 +18,10 @@ class DeviceError(RuntimeError):
     """The device returned an explicit failure."""
 
 
+class UnknownOutcome(RuntimeError):
+    """A sent action or write may have executed."""
+
+
 class Response:
     def __init__(self, request_id):
         self.id = request_id
@@ -123,10 +127,10 @@ async def _bluetooth(config, frame, response, timeout, sending):
                 return data
 
 
-def exchange(config, request):
+def exchange(config, request, token=None):
     """Execute one request. No write or action is automatically repeated."""
     op = request["op"]
-    token = secrets.token_hex(8)
+    token = token or secrets.token_hex(8)
     envelope = dict(request, v=1, id=token)
     frame = PREFIX + json.dumps(envelope, allow_nan=False, ensure_ascii=True,
                                 separators=(",", ":")).encode() + b"\n"
@@ -150,14 +154,50 @@ def exchange(config, request):
     except Exception as exc:
         detail = str(exc) or type(exc).__name__
         if sending[0] and op in ("write", "action"):
-            raise RuntimeError("Outcome unknown after sending %s: %s" % (op, detail)) from exc
+            raise UnknownOutcome(f"Outcome unknown after sending {op}: {detail}") from exc
         raise RuntimeError(detail) from exc
 
 
-if __name__ == "__main__":
+def report(result):
+    print(json.dumps(result, allow_nan=False, separators=(",", ":")), flush=True)
+
+
+def guarded_write(config, request):
+    token = secrets.token_hex(8)
+    guard = WriteGuard(config, request["key"], token)
     try:
-        inputs = json.load(sys.stdin)
-        result = {"ok": True, "data": exchange(inputs["config"], inputs["request"])}
+        report({"pending": guard.instruction("Outcome unknown after sending write.", guard.token)})
+        try:
+            data = exchange(config, request, token)
+            if not isinstance(data, str):
+                raise UnknownOutcome("Outcome unknown after sending write: invalid acknowledgement")
+        except (UnknownOutcome, DeviceError) as exc:
+            # v1 device errors may include confirmed partial groups and uncertain
+            # commits. Preserve the complete error for the host's subsequent attempts.
+            raise RuntimeError(guard.failed(str(exc))) from exc
+        except Exception:
+            guard.clear()  # exchange failed before it attempted transmission
+            raise
+        report({"ok": True, "data": data})
+        # Release only after the caller has received this definitive success.
+        # Process termination or a broken stdout/stdin leaves the incident pending.
+        if sys.stdin.readline() == "ack\n":
+            guard.clear()
+    finally:
+        guard.close()
+
+
+if __name__ == "__main__":
+    if "WriteGuard" not in globals():  # Running the source directly.
+        from write_guard import WriteGuard, reconcile
+    try:
+        inputs = json.loads(sys.stdin.readline())
+        config, request = inputs["config"], inputs["request"]
+        if request["op"] == "write":
+            guarded_write(config, request)
+        elif request["op"] == "reconcile":
+            report({"ok": True, "data": reconcile(config, request["token"])})
+        else:
+            report({"ok": True, "data": exchange(config, request)})
     except Exception as failure:
-        result = {"ok": False, "error": str(failure)}
-    print(json.dumps(result, allow_nan=False, separators=(",", ":")))
+        report({"ok": False, "error": str(failure)})

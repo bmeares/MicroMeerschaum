@@ -178,6 +178,10 @@ impl Plugin for ReceiverPlugin {
             .connector(ConnectorType::new("micro", device::METHODS.iter().copied()).instance())
             .action("micro_shell", "Open the selected device shell.")
             .action("micro_action", "Run one action on the selected device.")
+            .action(
+                "micro_reconcile",
+                "Permit a new write after inspecting an unresolved device Pipe.",
+            )
             .api_route(
                 RouteSpec::new("ingest", "POST", "/micromeerschaum/v1/batch").scopes([SCOPE]),
             )
@@ -229,8 +233,9 @@ impl Plugin for ReceiverPlugin {
     }
     fn call(&self, request: &Request, data: Option<Frame>) -> Result<Reply> {
         match (request.method.as_str(), request.context["name"].as_str()) {
-            ("action", Some("micro_shell")) => device::action(request, true),
-            ("action", Some("micro_action")) => device::action(request, false),
+            ("action", Some(command @ ("micro_shell" | "micro_action" | "micro_reconcile"))) => {
+                device::action(request, command)
+            }
             ("api_route", _) => meerschaum_plugin::sdk::call_server_extension(self, request),
             ("action", Some("micro_receiver_status")) => {
                 let rows = store::run(store::status(&configured()?.raw_store))
