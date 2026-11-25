@@ -46,6 +46,8 @@ The decorator returns the original function. A handler receives its remaining wo
 
 Each action on Pipes takes one value per selector. Use `-c` / `--connector-keys`, `-m` / `--metric-keys`, `-l` / `--location-keys` or `-i` / `--mrsm-instance` / `--instance`. For example, `copy pipes peer:archive -c plugin:chip_sensor -l None -i journal:local` selects that source's unlocated local journal. A multi-Pipe operation reports a result per attempted Pipe. Successful operations on earlier Pipes persist if a later Pipe fails. [Provisioning peer and API destinations](micropython.md#exchange-a-pipe)
 
+Return short messages from custom actions. The session serializes each result in RAM and limits the encoded reply to 4096 bytes. Use a bounded Pipe read for observation data.
+
 ## Application registries and access
 
 `make_action`, `expose`, `dispatch`, `complete` and `shell` in `micromeerschaum` use the module's `default_actions` registry. Construct an `ActionRegistry()` for a separate application or for a different host's view of the device. Call the same methods on that object. Closing a Pipe through any handle removes the live exposure from subsequent calls, including after reopening its store. Publish the reopened Pipe explicitly. `unexpose(pipe)` withdraws access immediately. Boot code rebuilds the view by exposing the already-open Pipes it chooses to publish. [Complete application example](../examples/micropython/device_actions.py)

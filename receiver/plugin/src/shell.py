@@ -42,6 +42,8 @@ def shell():
         if line.strip():
             try:
                 print(exchange(config, {"op": "action", "line": line}), flush=True)
+            except KeyboardInterrupt:
+                print("Interrupted. The action outcome is unknown. Inspect the device before retrying.", flush=True)
             except Exception as exc:
                 print(str(exc), file=sys.stderr, flush=True)
 
