@@ -58,7 +58,45 @@ A greenhouse sensor A and a controller B have a configured delivery for the temp
 3. Interrupt the connection after B commits and before A receives the reply. Restart B and reconnect. B can report the durable prefix it already holds. If A resends the same records, B recognizes their identities, retains one copy of each reading and returns its receipt.
 4. Append another reading on A. Verify that B receives it at the next sequence, that B can read the original records, and that A’s delivery cursor advances only after B’s receipt. Repeat with the node roles reversed using B’s own source stream.
 
-The host implementation runs this restart and retry scenario with opaque record bytes, a file-backed journal and a direct peer. The public device bindings, document codec, BLE exchange and multi-hop routing are release work. [Host journal](host-journal.md) · [Generation-scoped protocol](../spec/protocol-v1.md) · [Device sync convention](adr/0009-make-micropython-and-source-plugins-first-class.md)
+The native and MicroPython public interfaces implement this exchange with the bounded device journal and GATT. The mixed-runtime host test restarts both endpoints after a lost receipt in each role assignment. [Host journal](host-journal.md) · [Generation-scoped protocol](../spec/protocol-v1.md) · [Device sync convention](adr/0009-make-micropython-and-source-plugins-first-class.md)
+
+## Configure offline relay custody
+
+For A=1 → B=2 → D=9, provision the same origin, Pipe key, generation and final destination in three local images. In MicroPython, A sets `custodian=2`, B sets `receiver=True, custodian=2`, and D sets `receiver=True`. In native C the corresponding mode and role pairs are origin/custody, receiver/custody and receiver/destination. The first two use issuer 2 and the last uses issuer 9. Authenticate and authorize the immediate peer for the provisioned stream on each connection.
+
+| Node | `prefix` | `confirmed` | Reclamation |
+| --- | --- | --- | --- |
+| A | Locally committed | B's durable custody receipt | A can release complete segments through this cursor. |
+| B | Accepted custody | D's durable destination receipt, capped at B's contiguous prefix | B protects all pending originals under either retention policy. |
+| D | Durably accounted for at the destination | Unused | D retains the received records. |
+
+B builds onward batches using `pipe.batch()` or `mm_peer_batch()` on its incoming journal. It appends itself to an observed path, splitting the batch at a path boundary as necessary. The original record bytes, sequence, stream generation and final destination travel unchanged. A route-only arrival leaves the outgoing sequence cursor in place. The current BLE forwarding profile marks the new hop as BLE with timestamp zero (unknown). `pipe.routes()` returns each observed interval as `(first, last, authenticated_sender, reported_node_ids)`. Native `mm_journal_route_get()` also supplies the reported hop times and transports.
+
+The MicroPython BLE example provides `open_role`, `receive_window` and `send_window`. For example, after commissioning fixed-address authenticated bonds, B can run the following whenever the respective peers are available. Supply the enrolled aioble Device objects for A and D. An interrupted window leaves B's journal ready for the next connection. [MicroPython BLE example](../examples/micropython/offline_relay.py)
+
+```python
+import asyncio
+from offline_relay import open_role, receive_window, send_window
+
+relay = open_role("relay", "/store/RELAY.MM")
+asyncio.run(receive_window(relay, origin_device, sender=1))
+asyncio.run(send_window(relay, destination_device, issuer=9))
+```
+
+A runs `open_role("origin", ...)`, collects with `pipe.sync({"temperature_c": 21.4})`, then calls `send_window(pipe, relay_device, 2)`. D runs `receive_window(destination, relay_device, 2)`. Set `create=True` when commissioning a new image.
+
+The ESP-IDF example supplies the same roles for an application that owns GAP, bonding and its filesystem mount. Enable NimBLE and `CONFIG_MICROMEERSCHAUM_NIMBLE`, add the example source and include path to the application component, and open the journal with the appropriate mode and role. Keep `peer_role` in static storage. Call `peer_role_init()` after mounting. A peripheral calls `peer_role_register()` with the upstream enrollment after NimBLE initialization and before host startup. Advertise the peer service UUID. On each GAP disconnect call `peer_role_disconnect()` from the host callback. The example checks the bonded identity address, encryption and authentication for each operation. A central calls `peer_role_deliver()` in an application task after connecting and securing the link. Close a failed connection before retrying. Serialize local journal operations with the role's journal lock. [ESP-IDF example](../examples/esp-idf/peer/relay.c)
+
+### Reproduce mixed-runtime qualification
+
+Build the host targets with `cmake -S core -B build && cmake --build build`. Use a Unix MicroPython interpreter built with the project's user module. Run the driver from the project root.
+
+```sh
+MICROPYPATH=ports/micropython:.frozen python3 ports/micropython/tests/mixed_gatt.py \
+    build/mm_gatt_test_node /path/to/micropython
+```
+
+The driver connects two independently restarted processes over a simulated 20-byte ATT characteristic. It exercises native origin → MicroPython relay → native destination and MicroPython origin → native relay → MicroPython destination. Each leg loses the first reply after a durable commit, retries, verifies the exact original frame and reclaims released data. The origin image is removed before B forwards. Physical pairing, RF reconnects, timing and board power cuts require device qualification. [Fault-injection driver](../ports/micropython/tests/mixed_gatt.py) · [Native gap and route tests](../core/tests/test_custody.c)
 
 ## First implementation milestone
 

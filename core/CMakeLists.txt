@@ -54,6 +54,10 @@ if(UNIX)
     target_link_libraries(mm_temperature PRIVATE micromeerschaum_posix)
     target_compile_options(mm_temperature PRIVATE -Wall -Wextra -Wpedantic -Werror -fno-exceptions)
 
+    add_executable(mm_gatt_test_node tests/gatt_node.c)
+    target_link_libraries(mm_gatt_test_node PRIVATE micromeerschaum_posix)
+    target_compile_options(mm_gatt_test_node PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
     add_executable(mm_sync_example ../examples/host/sync.c)
     target_link_libraries(mm_sync_example PRIVATE micromeerschaum_posix)
     target_compile_options(mm_sync_example PRIVATE -Wall -Wextra -Wpedantic -Werror)
