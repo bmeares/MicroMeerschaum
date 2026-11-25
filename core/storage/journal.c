@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define ROUTE_FILE "routes.meta"
 #define STATE_FILE "journal.meta"
 #define PENDING_FILE ".journal.pending"
 #define STATE_MAX MM_STATE_MAX
@@ -30,6 +31,8 @@ struct mm_journal {
     char key[MM_KEY_MAX];
     bool uncertain;
     uint64_t confirmed, high, bytes;
+    uint8_t *routes;
+    size_t routes_len;
     segment *segments;
     size_t count, capacity;
     seq_range *coverage;         /* Sorted disjoint ranges, including declared loss. */
@@ -187,7 +190,7 @@ static mm_journal_status load_state(mm_journal *j)
         st = MM_JOURNAL_CONFLICT;
     else {
         j->confirmed = mm_get64(buf + 24);
-        if (c->mode == MM_JOURNAL_RECEIVER && j->confirmed) st = MM_JOURNAL_CORRUPT;
+        if (c->mode == MM_JOURNAL_RECEIVER && c->role != MM_CUSTODY && j->confirmed) st = MM_JOURNAL_CORRUPT;
         j->high = j->confirmed;
     }
     free(buf);
@@ -206,6 +209,52 @@ static void *grow(void *ptr, size_t *capacity, size_t elem)
 static bool separated(uint64_t last, uint64_t first)
 {
     return last < first && first - last > 1;
+}
+
+#include "routes.h"
+
+size_t mm_journal_route_count(const mm_journal *j)
+{
+    size_t count = 0;
+    if (j)
+        for (size_t i = 0; i < j->routes_len; i += route_size(j->routes + i)) ++count;
+    return count;
+}
+
+mm_journal_status mm_journal_route_get(const mm_journal *j, size_t index, mm_route_range *out)
+{
+    if (!j || !out) return MM_JOURNAL_INVALID;
+    if (j->uncertain) return MM_JOURNAL_UNCERTAIN;
+    for (size_t i = 0; i < j->routes_len; i += route_size(j->routes + i)) {
+        if (index-- == 0) {
+            decode_route(j->routes + i, out);
+            return MM_JOURNAL_OK;
+        }
+    }
+    return MM_JOURNAL_NOT_FOUND;
+}
+
+static mm_journal_status restore_routes(mm_journal *j)
+{
+    if (j->volume) {
+        const uint8_t *p = mm_volume_routes(j->volume, &j->routes_len);
+        if (!j->routes_len) return MM_JOURNAL_OK;
+        j->routes = malloc(j->routes_len);
+        if (!j->routes) return MM_JOURNAL_NOMEM;
+        memcpy(j->routes, p, j->routes_len);
+    }
+#ifndef ESP_PLATFORM
+    else {
+        mm_journal_status st = load_file(j, ROUTE_FILE, MM_ROUTE_BYTES + 4, &j->routes, &j->routes_len);
+        if (st == MM_JOURNAL_NOT_FOUND) return MM_JOURNAL_OK;
+        if (st != MM_JOURNAL_OK) return st;
+        if (j->routes_len < 4) return MM_JOURNAL_CORRUPT;
+        j->routes_len -= 4;
+        if (mm_get32(j->routes + j->routes_len) != mm_crc32(0, j->routes, j->routes_len))
+            return MM_JOURNAL_CORRUPT;
+    }
+#endif
+    return valid_routes(j->routes, j->routes_len) ? MM_JOURNAL_OK : MM_JOURNAL_CORRUPT;
 }
 
 static mm_journal_status account(mm_journal *j, seq_range r)
@@ -362,7 +411,7 @@ mm_journal_status mm_journal_delivery_start(mm_journal *j, uint64_t from, uint64
 
 /* Validate an entire incoming group before publishing anything. */
 static mm_journal_status inspect(mm_journal *j, const uint8_t *p, size_t n, seq_range *range,
-                                 uint64_t *added_bytes)
+                                 uint64_t *added_bytes, size_t *new_runs, bool skip_released)
 {
     size_t off = 0;
     bool in_new_run = false;
@@ -382,7 +431,15 @@ static mm_journal_status inspect(mm_journal *j, const uint8_t *p, size_t n, seq_
         size_t old_size;
         mm_journal_status st = lookup(j, rec.seq, &old, &old_size);
         if (st == MM_JOURNAL_NOT_FOUND) {
-            if (!in_new_run) *added_bytes += 28u + j->config.stream.key_len;
+            if (skip_released && rec.seq <= j->confirmed) {
+                off += used;
+                in_new_run = false;
+                continue;
+            }
+            if (!in_new_run) {
+                *added_bytes += 28u + j->config.stream.key_len;
+                ++*new_runs;
+            }
             *added_bytes += used;
             in_new_run = true;
         } else {
@@ -437,7 +494,8 @@ static mm_journal_status restore_segment(mm_journal *j, seq_range range)
     if (st == MM_JOURNAL_OK) {
         seq_range decoded = {0, 0};
         uint64_t added = 0;
-        st = inspect(j, buf + header, size - header, &decoded, &added);
+        size_t runs = 0;
+        st = inspect(j, buf + header, size - header, &decoded, &added, &runs, false);
         if (st == MM_JOURNAL_CONFLICT || st == MM_JOURNAL_INVALID ||
             (st == MM_JOURNAL_OK && added != size)) st = MM_JOURNAL_CORRUPT;
     }
@@ -452,6 +510,10 @@ static mm_journal_status recover(mm_journal *j, bool provision)
     bool new_store = st == MM_JOURNAL_NOT_FOUND;
     if (new_store && !provision) return st;
     if (!new_store && st != MM_JOURNAL_OK) return st;
+    if (!new_store) {
+        st = restore_routes(j);
+        if (st != MM_JOURNAL_OK) return st;
+    }
     if (j->confirmed) {
         st = account(j, (seq_range){1, j->confirmed});
         if (st != MM_JOURNAL_OK) return st;
@@ -481,6 +543,7 @@ static mm_journal_status recover(mm_journal *j, bool provision)
         if (!ent) { if (errno) st = MM_JOURNAL_IO; break; }
         const char *name = ent->d_name;
         if (!strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, STATE_FILE)) continue;
+        if (!new_store && !strcmp(name, ROUTE_FILE)) continue;
         if (!strcmp(name, PENDING_FILE)) { pending = true; continue; }
         seq_range range;
         if (new_store || !parse_name(name, &range)) { st = MM_JOURNAL_CORRUPT; break; }
@@ -566,6 +629,7 @@ void mm_journal_close(mm_journal *j)
     if (!j) return;
     if (j->dir >= 0) close(j->dir);
     mm_volume_close(j->volume);
+    free(j->routes);
     free(j->segments);
     free(j->coverage);
     free(j->cache);
@@ -627,17 +691,50 @@ static mm_journal_status publish_run(mm_journal *j, const uint8_t *records, size
     return st == MM_JOURNAL_OK ? st : uncertain(j);
 }
 
-static mm_journal_status commit(mm_journal *j, const uint8_t *records, size_t len)
+static mm_journal_status commit(mm_journal *j, const uint8_t *records, size_t len,
+                                const mm_route_range *route)
 {
     size_t header = 28u + j->config.stream.key_len;
     if (len > segment_limit(j) - header) return MM_JOURNAL_TOO_SMALL;
     seq_range range = {0, 0};
     uint64_t added = 0;
-    mm_journal_status st = inspect(j, records, len, &range, &added);
-    if (st != MM_JOURNAL_OK || added == 0) return st;
+    size_t runs = 0;
+    bool skip_released = j->config.mode == MM_JOURNAL_RECEIVER;
+    mm_journal_status st = inspect(j, records, len, &range, &added, &runs, skip_released);
+    if (st != MM_JOURNAL_OK) return st;
+    if (route && (route->first != range.first || route->last != range.last)) return MM_JOURNAL_INVALID;
+    if (!added && !route) return MM_JOURNAL_OK;
+    if (j->volume && runs > mm_volume_capacity(j->volume) - j->count) return MM_JOURNAL_FULL;
     uint64_t max = j->config.max_bytes;
-    if (j->bytes > UINT64_MAX - added || (max && (j->bytes >= max || added > max - j->bytes)))
+    if (j->bytes > UINT64_MAX - added || (added && max && (j->bytes >= max || added > max - j->bytes)))
         return MM_JOURNAL_FULL;
+
+    if (route) {
+        uint8_t *next = malloc(MM_ROUTE_BYTES + 4);
+        if (!next) return MM_JOURNAL_NOMEM;
+        size_t size = 0;
+        st = merge_route(j->routes, j->routes_len, route, next, &size);
+        if (size && st == MM_JOURNAL_OK) {
+            if (j->volume) {
+                /* The first published slot and its route share a checkpoint. */
+                mm_volume_stage_routes(j->volume, next, size);
+            }
+#ifndef ESP_PLATFORM
+            else {
+                mm_put32(next + size, mm_crc32(0, next, size));
+                st = publish(j, ROUTE_FILE, next, size + 4, NULL, 0);
+            }
+#endif
+            if (st == MM_JOURNAL_OK) {
+                free(j->routes);
+                j->routes = next;
+                j->routes_len = size;
+                next = NULL;
+            }
+        }
+        free(next);
+        if (st != MM_JOURNAL_OK) return st;
+    }
 
     /* A normal new batch publishes one segment. With a partially repeated
      * batch publish only disjoint missing runs. A retry skips any run already
@@ -648,7 +745,7 @@ static mm_journal_status commit(mm_journal *j, const uint8_t *records, size_t le
         size_t start = off;
         off += MM_RECORD_HEADER_SIZE + (size_t)mm_get32(rec + 4);
         uint64_t first = mm_get64(rec + 8);
-        if (containing(j, first)) continue;
+        if ((skip_released && first <= j->confirmed) || containing(j, first)) continue;
         uint64_t last = first;
         while (off < len && !containing(j, last + 1)) {
             ++last; /* inspect checked that subsequent sequence numbers cannot wrap. */
@@ -657,6 +754,11 @@ static mm_journal_status commit(mm_journal *j, const uint8_t *records, size_t le
         st = publish_run(j, records + start, off - start, (seq_range){first, last}, 0, mm_journal_missed(j));
         if (st != MM_JOURNAL_OK) return st;
     }
+    if (route && j->volume) {
+        st = mm_volume_commit_routes(j->volume);
+        if (st == MM_JOURNAL_UNCERTAIN) return uncertain(j);
+        return st;
+    }
     return MM_JOURNAL_OK;
 }
 
@@ -664,7 +766,18 @@ mm_journal_status mm_journal_ingest(mm_journal *j, const uint8_t *records, size_
 {
     if (!j || j->config.mode != MM_JOURNAL_RECEIVER || (!records && len)) return MM_JOURNAL_INVALID;
     if (j->uncertain) return MM_JOURNAL_UNCERTAIN;
-    return len ? commit(j, records, len) : MM_JOURNAL_OK;
+    return len ? commit(j, records, len, NULL) : MM_JOURNAL_OK;
+}
+
+mm_journal_status mm_journal_ingest_route(mm_journal *j, const uint8_t *records, size_t len,
+                                          const mm_route_range *route)
+{
+    if (!j || j->config.mode != MM_JOURNAL_RECEIVER || !records || !len ||
+        !route || route->hop_count > MM_BATCH_MAX_HOPS) return MM_JOURNAL_INVALID;
+    if (j->uncertain) return MM_JOURNAL_UNCERTAIN;
+    for (size_t i = 0; i < route->hop_count; ++i)
+        if ((unsigned)route->hops[i].transport > MM_TRANSPORT_USB) return MM_JOURNAL_INVALID;
+    return commit(j, records, len, route);
 }
 
 #define LOSS_FRAME (MM_RECORD_HEADER_SIZE + MM_LOSS_SIZE)
@@ -771,7 +884,7 @@ mm_journal_status mm_journal_append_group(mm_journal *j, const mm_sample *rows, 
         if (row->len) memcpy(buf + off, row->payload, row->len);
         off += row->len;
     }
-    if (st == MM_JOURNAL_OK) st = commit(j, buf, len);
+    if (st == MM_JOURNAL_OK) st = commit(j, buf, len, NULL);
     if (st == MM_JOURNAL_FULL && keep_new) st = replace_oldest(j, rows, count, buf, len);
     if (st == MM_JOURNAL_OK || st == MM_JOURNAL_UNCERTAIN) *first_seq = first;
     if (st == MM_JOURNAL_FULL && j->volume) {
@@ -798,23 +911,27 @@ mm_journal_status mm_journal_append(mm_journal *j, mm_kind kind, uint64_t mono_u
 
 mm_journal_status mm_journal_confirm(mm_journal *j, const mm_receipt *receipt)
 {
-    if (!j || !receipt || j->config.mode != MM_JOURNAL_ORIGIN) return MM_JOURNAL_INVALID;
+    if (!j || !receipt || (j->config.mode == MM_JOURNAL_RECEIVER && j->config.role != MM_CUSTODY)) return MM_JOURNAL_INVALID;
     if (j->uncertain) return MM_JOURNAL_UNCERTAIN;
     const mm_journal_config *c = &j->config;
-    if (receipt->role != c->role || receipt->issuer != c->issuer ||
+    bool relay = c->mode == MM_JOURNAL_RECEIVER;
+    if (receipt->role != (relay ? MM_DESTINATION : c->role) ||
+        receipt->issuer != (relay ? c->destination : c->issuer) ||
         receipt->destination != c->destination || !mm_stream_equal(&receipt->stream, &c->stream))
         return MM_JOURNAL_CONFLICT;
-    if (receipt->through > j->high) return MM_JOURNAL_INVALID;
-    if (receipt->through <= j->confirmed) return MM_JOURNAL_OK;
-    mm_journal_status st = store_state(j, receipt->through);
+    uint64_t through = receipt->through;
+    if (relay && through > mm_journal_prefix(j)) through = mm_journal_prefix(j);
+    if (through > j->high) return MM_JOURNAL_INVALID;
+    if (through <= j->confirmed) return MM_JOURNAL_OK;
+    mm_journal_status st = store_state(j, through);
     if (st == MM_JOURNAL_UNCERTAIN) return uncertain(j);
-    if (st == MM_JOURNAL_OK) j->confirmed = receipt->through;
+    if (st == MM_JOURNAL_OK) j->confirmed = through;
     return st;
 }
 
 mm_journal_status mm_journal_reclaim(mm_journal *j)
 {
-    if (!j || j->config.mode != MM_JOURNAL_ORIGIN) return MM_JOURNAL_INVALID;
+    if (!j || (j->config.mode == MM_JOURNAL_RECEIVER && j->config.role != MM_CUSTODY)) return MM_JOURNAL_INVALID;
     if (j->uncertain) return MM_JOURNAL_UNCERTAIN;
     if (j->volume) {
         mm_journal_status st = mm_volume_trim(j->volume, j->confirmed);
@@ -837,6 +954,7 @@ mm_journal_status mm_journal_reclaim(mm_journal *j)
         j->bytes -= s.size;
     }
     if (kept == j->count) {
+        if (j->config.mode == MM_JOURNAL_RECEIVER) return MM_JOURNAL_OK;
         mm_journal_status st = mm_journal_flush_loss(j);
         return st == MM_JOURNAL_FULL ? MM_JOURNAL_OK : st;
     }
@@ -846,6 +964,7 @@ mm_journal_status mm_journal_reclaim(mm_journal *j)
 #ifndef ESP_PLATFORM
     if (!j->volume && sync_fd(j, j->dir) < 0) return uncertain(j);
 #endif
+    if (j->config.mode == MM_JOURNAL_RECEIVER) return MM_JOURNAL_OK;
     mm_journal_status st = mm_journal_flush_loss(j);
     return st == MM_JOURNAL_FULL ? MM_JOURNAL_OK : st;
 }

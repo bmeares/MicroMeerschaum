@@ -100,11 +100,15 @@ static mp_obj_t append(size_t n, const mp_obj_t *a) {
         if (b.len > MM_RECORD_MAX_PAYLOAD) mp_raise_ValueError(MP_ERROR_TEXT("record too large"));
         group[i] = (mm_sample){MM_KIND_DATA, mono, boot, b.buf, (uint32_t)b.len};
     }
+    mp_obj_t success_items[] = {MP_OBJ_NEW_QSTR(MP_QSTR_ok), MP_OBJ_NEW_SMALL_INT(count),
+        MP_OBJ_NEW_SMALL_INT(0), MP_OBJ_NEW_SMALL_INT(0)};
+    mp_obj_t success = mp_obj_new_tuple(4, success_items);
     uint64_t first;
     mm_journal_status st = target.append(target.context,group,count,&first);
+    if (st == MM_JOURNAL_OK) return success;
     bool uncertain = st == MM_JOURNAL_UNCERTAIN && first;
     const char *name = mm_journal_status_name(st);
-    mp_obj_t result[] = {mp_obj_new_str(name,strlen(name)),mp_obj_new_int(st == MM_JOURNAL_OK ? count : 0),
+    mp_obj_t result[] = {mp_obj_new_str(name,strlen(name)),MP_OBJ_NEW_SMALL_INT(0),
         mp_obj_new_int_from_ull(uncertain ? first : 0), mp_obj_new_int(uncertain ? count : 0)};
     return mp_obj_new_tuple(4,result);
 }

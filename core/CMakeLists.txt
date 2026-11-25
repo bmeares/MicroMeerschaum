@@ -36,7 +36,7 @@ if(UNIX)
     target_link_libraries(micromeerschaum_posix PUBLIC micromeerschaum)
     target_compile_options(micromeerschaum_posix PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Werror)
 
-    foreach(test journal delivery sender volume)
+    foreach(test journal delivery sender volume custody)
         add_executable(test_${test} tests/test_${test}.c)
         target_link_libraries(test_${test} PRIVATE micromeerschaum_posix)
         target_compile_options(test_${test} PRIVATE -Wall -Wextra -Wpedantic -Werror)

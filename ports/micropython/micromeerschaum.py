@@ -24,39 +24,59 @@ def _wire_key(connector, metric, location):
 
 
 class _Registration:
-    def __init__(self, store, path, budget, destination, boot, retention):
+    def __init__(self, store, path, budget, delivery_issuer, boot, retention, custody):
         self.store = store
         self.path = path
         self.budget = budget
-        self.destination = destination
+        self.delivery_issuer = delivery_issuer
+        self.custody = custody
         self.boot = boot
         self.retention = retention
 
 
-def provision_peer(name, issuer, exchange):
+def _remote(name):
+    return name.startswith("peer:") or name.startswith("api:")
+
+
+def provision_peer(name, issuer, exchange, cap=4096, max_records=8):
     """Install the transport to an authenticated, provisioned destination."""
-    if not isinstance(name, str) or not name.startswith("peer:") or len(name) == 5:
-        raise ValueError("expected peer:name")
+    if not isinstance(name, str) or not _remote(name) or not name.split(":", 1)[1]:
+        raise ValueError("expected peer:name or api:name")
     if not callable(exchange) or not isinstance(issuer, int) or not 0 < issuer < 1 << 64:
         raise ValueError("expected an issuer and exchange(batch) callable")
-    _peers[name] = (issuer, exchange)
+    if cap < 1 or max_records < 1:
+        raise ValueError("positive transfer limits required")
+    _peers[name] = (issuer, exchange, cap, max_records)
 
 
 def provision(connector, metric, path, origin, generation, destination, location=None,
               instance=_local, receiver=False, segments=16, segment_bytes=4096,
-              retention="keep-old", create=False, boot=0):
+              retention="keep-old", create=False, boot=0, custodian=None,
+              columns=None, axis=None, autotime=False):
     pipe = Pipe(connector, metric, location, instance)
-    if not instance.startswith("journal:"):
-        raise ValueError("expected a journal instance")
     if pipe._id() in _stores or any(c.path == path for c in _stores.values()):
         raise ValueError("close the Pipe before provisioning it again")
     if retention not in ("keep-old", "keep-new"):
         raise ValueError("unknown retention policy")
-    store = _mm.open_volume(path, pipe._wire, origin, generation, destination, receiver,
-                            segments, segment_bytes, retention == "keep-new", create)
-    # The core reserves room for a sequence-bearing loss record under keep-new.
-    budget = segment_bytes - 28 - len(pipe._wire.encode()) - (56 if retention == "keep-new" else 0)
-    _stores[pipe._id()] = _Registration(store, path, budget, destination, boot, retention)
+    if instance == "sql:local":
+        if receiver or custodian is not None or retention != "keep-old":
+            raise ValueError("sql:local requires an originating destination delivery")
+        import _mmsqlite
+        store = _mmsqlite.open(path, pipe._wire, origin, generation, destination,
+                              columns, axis, autotime, create)
+        budget = segment_bytes
+    elif instance.startswith("journal:"):
+        if columns is not None or axis is not None or autotime:
+            raise ValueError("row registration requires sql:local")
+        store = _mm.open_volume(path, pipe._wire, origin, generation, destination, receiver,
+                                segments, segment_bytes, retention == "keep-new", create, custodian)
+        # A keep-new segment also reserves space for the eviction declaration.
+        budget = segment_bytes - 28 - len(pipe._wire.encode()) - (56 if retention == "keep-new" else 0)
+    else:
+        raise ValueError("unknown storage instance")
+    issuer = custodian if custodian is not None and not receiver else destination
+    _stores[pipe._id()] = _Registration(store, path, budget, issuer, boot, retention,
+                                        custodian is not None and not receiver)
     return pipe
 
 
@@ -107,7 +127,7 @@ class Pipe:
         self.uncertain_count = 0
 
     def _id(self):
-        return (_local if self.instance_keys.startswith("peer:") else self.instance_keys, self._wire)
+        return (_local if _remote(self.instance_keys) else self.instance_keys, self._wire)
 
     def _config(self):
         config = _stores.get(self._id())
@@ -146,12 +166,14 @@ class Pipe:
 
     def sync(self, df=_missing, **kw):
         self.staged_input = self.confirmed_input = self.uncertain_first = self.uncertain_count = 0
-        remote = self.instance_keys.startswith("peer:")
+        remote = _remote(self.instance_keys)
         start = None
         try:
             config = self._config()
             if remote:
                 self._peer(self.instance_keys)
+                if config.custody:
+                    raise ValueError("direct sync requires a final destination")
                 if config.retention != "keep-old":
                     raise ValueError("peer staging requires keep-old retention")
                 start = self.progress()["high"]
@@ -223,29 +245,34 @@ class Pipe:
             after = store.progress()[2]
         return store.batch(after, max_records, cap)
 
-    def receive(self, authenticated_origin, batch):
-        return self._config().store.receive(authenticated_origin, batch)
+    def receive(self, authenticated_sender, batch):
+        return self._config().store.receive(authenticated_sender, batch)
+
+    def routes(self):
+        """Return (first, last, authenticated sender, reported hops) for each observed route."""
+        return self._config().store.routes()
 
     def confirm(self, authenticated_issuer, receipt):
         self._config().store.confirm(authenticated_issuer, receipt)
 
     def reclaim(self):
-        self._config().store.reclaim()
+        if self.instance_keys != "sql:local":
+            self._config().store.reclaim()
 
     def _peer(self, name):
         peer = _peers.get(name)
         if peer is None:
             raise ValueError("peer has not been provisioned")
-        if peer[0] != self._config().destination:
+        if peer[0] != self._config().delivery_issuer:
             raise ValueError("peer identity differs from provisioned destination")
         return peer
 
     def _deliver(self, name):
-        issuer, exchange = self._peer(name)
+        issuer, exchange, cap, max_records = self._peer(name)
         state = self.progress()
         through = state["confirmed"]
         while through < state["high"]:
-            receipt = exchange(self.batch(after=through))
+            receipt = exchange(self.batch(after=through, cap=cap, max_records=max_records))
             self.confirm(issuer, receipt)
             next_through = self.progress()["confirmed"]
             if next_through <= through:
@@ -256,10 +283,20 @@ class Pipe:
     def deliver(self, peer=None):
         try:
             through = self._deliver(self.instance_keys if peer is None else peer)
-            return True, "peer confirmed through %d" % through
+            role = "custodian" if self._config().custody else "destination"
+            return True, "%s confirmed through %d" % (role, through)
         except Exception as error:
             return False, str(error)
 
     def copy_to(self, instance):
         """Copy pending original records to a compatible provisioned peer Pipe."""
         return self.deliver(instance)
+
+    def get_docs(self, begin=None, end=None, params=None, limit=100):
+        """Return up to limit current SQLite rows in the half-open axis interval."""
+        encoded = self._config().store.docs(begin, end, params, limit)
+        return [_mm.decode(payload) for payload in encoded]
+
+    def get_sync_time(self, params=None):
+        """Latest matching SQLite axis value, as integer ticks or Unix microseconds."""
+        return self._config().store.sync_time(params)
