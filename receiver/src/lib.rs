@@ -3,6 +3,7 @@
 //! vectors in `../vectors` keep the two implementations in agreement.
 
 mod batch;
+pub mod document;
 pub mod protocol;
 mod record;
 mod segment;
