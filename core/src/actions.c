@@ -271,7 +271,14 @@ static bool show_actions(const mm_action_call *call, mm_action_output *out, void
 
 static bool help(const mm_action_call *call, mm_action_output *out, void *ctx)
 {
-    if (!call->argc) return show_actions(call, out, ctx);
+    (void)ctx;
+    return mm_actions_help(call, out);
+}
+
+bool mm_actions_help(const mm_action_call *call, mm_action_output *out)
+{
+    if (!call || !call->view || !call->view->registry || !out) return false;
+    if (!call->argc) return show_actions(call, out, NULL);
     size_t len = call->tail_len;
     while (len && space(call->raw_tail[len - 1])) len--;
     for (size_t i = 0; i < call->view->registry->count; i++) {
