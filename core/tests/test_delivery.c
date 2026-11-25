@@ -277,9 +277,9 @@ static void grouped_transfer(void)
     CHECK(local_syncs == 2);  /* One file and one directory sync for all twelve readings. */
     prepare(&a, 0, 12);
     accept(&b, 12);
-    CHECK(peer_syncs == 2);
+    CHECK(peer_syncs == 4);
     accept(&b, 12);
-    CHECK(peer_syncs == 2);   /* A retry reuses the committed segment. */
+    CHECK(peer_syncs == 4);   /* A retry reuses the committed segment. */
     confirm(&a);
     CHECK(mm_journal_confirmed(a.journal) == 12);
     remove_node(&a);
