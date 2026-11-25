@@ -1,9 +1,10 @@
 set(IDF_TARGET esp32s3)
-# The stock 1.28.0 port drops passkey requests when acting as a central.
+# Reject stock v1.28.0 and the earlier passkey-only patch.
 set(mm_nimble_source "${CMAKE_CURRENT_SOURCE_DIR}/../../extmod/nimble/modbluetooth_nimble.c")
 if(EXISTS "${mm_nimble_source}")
     file(SHA256 "${mm_nimble_source}" mm_nimble_sha)
-    if(mm_nimble_sha STREQUAL "6011b234f0737c6b4ecdf5384d0928729b5b7cc85a6746168e545c96ae40ad84")
+    if(mm_nimble_sha STREQUAL "6011b234f0737c6b4ecdf5384d0928729b5b7cc85a6746168e545c96ae40ad84"
+       OR mm_nimble_sha STREQUAL "e7ea4f371fdb50f563cb9319ab8bf3c5ee058a0d84b9a3af79efb79ebe1113fa")
         message(FATAL_ERROR "Apply ports/micropython/patches/v1.28.0-nimble-passkey.patch to MicroPython before building this board.")
     endif()
 endif()

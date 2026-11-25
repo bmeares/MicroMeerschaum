@@ -194,7 +194,7 @@ make -C ../micropython/ports/esp32 BOARD_DIR="$board" submodules
 make -C ../micropython/ports/esp32 BOARD_DIR="$board"
 ```
 
-The patch forwards the NimBLE passkey event through the callback shared by the central and peripheral. Both devices can then complete authenticated first-time pairing. It applies to the pinned MicroPython checkout. [Board patch](../ports/micropython/patches/v1.28.0-nimble-passkey.patch)
+The patch forwards the NimBLE passkey event through the callback shared by the central and peripheral. It also reports the live NimBLE security state after a bonded central reconnects if encryption resumed before the connect event. Both devices can then complete authenticated first-time pairing and restore their bond. It applies to the pinned MicroPython checkout. [Board patch](../ports/micropython/patches/v1.28.0-nimble-passkey.patch)
 
 Flash `../micropython/ports/esp32/build-MM_ESP32_S3/firmware.bin` at offset zero using the installation command above. The native ESP-IDF storage examples use their own SDK version. [Native storage build](device-storage.md#run-the-storage-example)
 
