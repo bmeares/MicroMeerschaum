@@ -1,0 +1,8 @@
+menu "MicroMeerschaum"
+    config MICROMEERSCHAUM_HTTPS
+        bool "Enable HTTPS batch sender"
+        default n
+        help
+            Provide the ESP-IDF client for the hosted binary ingest endpoint.
+            The application provisions the receiver identity, URL and API key.
+endmenu

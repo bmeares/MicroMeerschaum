@@ -7,5 +7,10 @@ idf_component_register(
     SRCS "core/src/crc32.c" "core/src/wire.c" "core/src/record.c" "core/src/segment.c" "core/src/batch.c"
          "core/src/protocol.c"
     INCLUDE_DIRS "core/include"
+    PRIV_REQUIRES esp_http_client mbedtls
 )
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+
+if(CONFIG_MICROMEERSCHAUM_HTTPS)
+    target_sources(${COMPONENT_LIB} PRIVATE "ports/esp-idf/https.c")
+endif()
