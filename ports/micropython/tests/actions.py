@@ -201,9 +201,11 @@ registry.expose(p)
 assert not call("write", key=key, rows=[row])["ok"]
 screen = io.StringIO()
 registry.shell(io.StringIO("field accidental\x03field hi\r\nsho?\nfield fai\t\nexit\n"), screen)
-assert "show pipes" in screen.getvalue() and "unavailable" in screen.getvalue()
+shell_out = screen.getvalue()
+assert shell_out.startswith("MicroMeerschaum 0.2.1\n[ journal:local ] > "), shell_out
+assert "+ hi\n" in shell_out and "+ show pipes\n" in shell_out and "- unavailable\n" in shell_out, shell_out
 assert ["accidental"] not in calls and calls[-1] == ["hi"]
-assert "^C\n[ journal:local ] > " in screen.getvalue()
+assert "^C\n[ journal:local ] > " in shell_out
 assert not json.loads(DeviceSession(registry).handle(frame("actions")[:-1])[len(PREFIX):])["ok"]
 for pipe in (p, source, sink, hidden):
     pipe.close()
@@ -393,3 +395,119 @@ assert entry is dispatch
 assert entry("module bare ping ok") == (True, "bare:ok")
 assert default_actions.help_for("module bare ping") is None
 print("bare @make_action, help metadata, docstring fallback, and entry alias")
+
+# Interactive shell polish: dynamic instance prompt & scoping, ANSI/Unicode, clear, ?, history.
+sh_reg = ActionRegistry()
+sh_seen = []
+
+
+@sh_reg.make_action("note", help="Record a note.")
+def sh_note(args):
+    sh_seen.append(args)
+    return True, " ".join(args) if args else "empty"
+
+
+@sh_reg.make_action("boom")
+def sh_boom(args):
+    return False, "kapow"
+
+
+p_local = provision("sensor", "alpha", root + "/sh-local.mm", 1, 41, 2, create=True)
+p_alt = provision("sensor", "beta", root + "/sh-alt.mm", 1, 42, 2, instance="journal:alt", create=True)
+sh_reg.expose(p_local, read=True, write=True)
+sh_reg.expose(p_alt, read=True, write=True)
+
+# 1. Dynamic instance switching, automatic -i scoping, explicit -i override, reset, clear, ?.
+out = io.StringIO()
+sh_reg.shell(io.StringIO(
+    "show pipes\n"
+    "instance\n"
+    "instance journal:alt\n"
+    "show pipes\n"
+    "show pipe -i journal:local\n"
+    "instance bad space\n"
+    "instance all\n"
+    "show pipes\n"
+    "clear\n"
+    "?\n"
+    "zzz?\n"
+    "boom\n"
+    "exit\n"
+), out)
+text = out.getvalue()
+assert text.startswith("MicroMeerschaum 0.2.1\n[ journal:local ] > "), text
+assert "+ Pipe('sensor', 'alpha')\n+ Pipe('sensor', 'beta', instance='journal:alt')\n" in text, text
+assert "+ journal:local\n" in text, text
+assert "+ Active instance: journal:alt\n[ journal:alt ] > " in text, text
+# Scoped show pipes under journal:alt omits alpha.
+after_switch = text.split("[ journal:alt ] > show pipes\n", 1)[1].split("[ journal:alt ] > ", 1)[0]
+assert after_switch == "+ Pipe('sensor', 'beta', instance='journal:alt')\n", after_switch
+# Explicit -i overrides active instance.
+after_override = text.split("show pipe -i journal:local\n", 1)[1].split("[ journal:alt ] > ", 1)[0]
+assert after_override == "+ Pipe('sensor', 'alpha')\n", after_override
+assert "- Usage: instance [KEYS|all|default|reset]\n" in text, text
+assert "+ Active instance: journal:local\n[ journal:local ] > " in text, text
+assert "\x1b[2J\x1b[H[ journal:local ] > " in text, text
+assert "+ note\n" in text and "- no matching actions\n" in text and "- kapow\n" in text, text
+
+# 2. ANSI + Unicode styling mode.
+styled = io.StringIO()
+sh_reg.shell(
+    io.StringIO("note ok\nboom\nexit\n"),
+    styled,
+    instance="journal:alt",
+    ansi=True,
+    unicode=True,
+)
+styled_text = styled.getvalue()
+assert styled_text.startswith("MicroMeerschaum 0.2.1\n\x1b[32m[\x1b[0m \x1b[36mjournal:alt\x1b[0m \x1b[32m] \u27a4\x1b[0m "), styled_text
+assert "\x1b[32m+ \x1b[0mok\n" in styled_text, styled_text
+assert "\x1b[31m- \x1b[0mkapow\n" in styled_text, styled_text
+
+# 3. Bounded VT100 history ring buffer (size=3), deduplication, Up/Down recall, CSI ignore.
+hist_out = io.StringIO()
+sh_seen.clear()
+sh_reg.shell(
+    io.StringIO(
+        "note one\n"
+        "note two\n"
+        "note two\n"     # consecutive duplicate deduplicated
+        "note three\n"
+        "note four\n"    # evicts "note one" (history_size=3 -> [two, three, four])
+        "\x1b[A\x1b[A\x1b[B\n"           # Up(four), Up(three), Down(four) -> runs four
+        "\x1b[A\x1b[A\x1b[A\x1b[A\n"     # Up x4 clamps at oldest (two) -> runs two
+        "\x1b[A\x1b[B\n"                 # Up(two) then Down("") -> empty line, no dispatch
+        "note \x1b[D\x1b[C\x1b[3~clean\n"  # other CSI sequences ignored cleanly
+        "exit\n"
+    ),
+    hist_out,
+    history_size=3,
+)
+assert sh_seen == [["one"], ["two"], ["two"], ["three"], ["four"], ["four"], ["two"], ["clean"]], sh_seen
+assert "\b \b" in hist_out.getvalue()
+
+# 4. Recalled pipe command uses the newly switched instance, not the old one.
+re_out = io.StringIO()
+sh_reg.shell(
+    io.StringIO("instance journal:alt\nshow pipes\ninstance journal:local\n\x1b[A\x1b[A\nexit\n"),
+    re_out,
+)
+re_text = re_out.getvalue()
+re_tail = re_text.rsplit("[ journal:local ] > ", 2)[1]
+assert "+ Pipe('sensor', 'alpha')\n" in re_tail and "beta" not in re_tail, re_tail
+
+# 5. Reject invalid shell options.
+for bad_call in (
+    lambda: sh_reg.shell(io.StringIO(""), io.StringIO(), instance=""),
+    lambda: sh_reg.shell(io.StringIO(""), io.StringIO(), instance="bad space"),
+    lambda: sh_reg.shell(io.StringIO(""), io.StringIO(), history_size=-1),
+):
+    try:
+        bad_call()
+        raise AssertionError("accepted invalid shell() option")
+    except ValueError:
+        pass
+
+p_local.close()
+p_alt.close()
+print("interactive shell greeting, dynamic prompt, instance scoping, ANSI/Unicode, clear, ?, and history")

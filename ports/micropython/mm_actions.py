@@ -388,13 +388,114 @@ class ActionRegistry:
             results.append(("+ " if result[0] else "- ") + entry.label() + "  " + result[1])
         return ok, "\n".join(results)
 
-    def shell(self, reader=None, writer=None):
+    def shell(self, reader=None, writer=None, instance="journal:local",
+              ansi=False, unicode=False, history_size=16):
         """Enter the device prompt. Ctrl-C cancels input. Exit or Ctrl-D at an empty line returns."""
         import sys
         reader = reader or sys.stdin
         writer = writer or sys.stdout
+
+        def valid_instance(text):
+            return (isinstance(text, str) and 1 <= len(text) <= 63 and
+                    all(32 < ord(c) <= 126 and c not in ("'", '"', "\\") for c in text))
+
+        if not valid_instance(instance):
+            raise ValueError("invalid instance keys")
+        if type(history_size) is not int or history_size < 0:
+            raise ValueError("invalid history_size")
+
+        default_instance = instance
+        active_instance = instance
+        filter_instance = False
+        pipe_commands = (
+            ("show", "pipes"), ("show", "pipe"),
+            ("sync", "pipes"), ("sync", "pipe"),
+            ("copy", "pipes"), ("copy", "pipe"),
+            ("show", "data"), ("show", "datum"),
+            ("show", "columns"), ("show", "column"),
+            ("show", "rowcounts"), ("show", "rowcount"),
+            ("show", "progress"),
+        )
+
+        def make_prompt():
+            arrow = "\u27a4" if unicode else ">"
+            if ansi:
+                return "\x1b[32m[\x1b[0m \x1b[36m" + active_instance + "\x1b[0m \x1b[32m] " + arrow + "\x1b[0m "
+            return "[ " + active_instance + " ] " + arrow + " "
+
+        def status_marker(ok):
+            if ansi:
+                return "\x1b[32m+ \x1b[0m" if ok else "\x1b[31m- \x1b[0m"
+            return "+ " if ok else "- "
+
+        def format_reply(ok, message):
+            if not message:
+                return status_marker(ok) + "\n"
+            lines = message.split("\n")
+            if lines and lines[-1] == "":
+                lines = lines[:-1]
+            out = []
+            for entry in lines:
+                if entry.startswith("+ "):
+                    out.append(status_marker(True) + entry[2:])
+                elif entry.startswith("- "):
+                    out.append(status_marker(False) + entry[2:])
+                else:
+                    out.append(status_marker(ok) + entry)
+            return "\n".join(out) + "\n"
+
+        def scope_line(raw):
+            if not filter_instance:
+                return raw
+            try:
+                words = _words(raw)
+            except ValueError:
+                return raw
+            if len(words) < 2 or (words[0], words[1]) not in pipe_commands:
+                return raw
+            at = 0
+            for _ in range(2):
+                while at < len(raw) and raw[at] in " \t":
+                    at += 1
+                while at < len(raw) and raw[at] not in " \t":
+                    at += 1
+            try:
+                args = _arguments(raw[at:])
+            except ValueError:
+                return raw
+            for arg in args:
+                if arg in ("-i", "--instance", "--mrsm-instance"):
+                    return raw
+            return raw + " -i " + active_instance
+
+        history = []
+        hist_pos = 0
+
+        def push_history(entry):
+            if history_size <= 0 or not entry:
+                return
+            if history and history[-1] == entry:
+                return
+            if len(history) >= history_size:
+                del history[0]
+            history.append(entry)
+
+        def replace_line(current, replacement):
+            if current:
+                writer.write("\b \b" * len(current))
+            if replacement:
+                writer.write(replacement)
+            return replacement
+
+        try:
+            import micromeerschaum as _mrsm
+            version = getattr(_mrsm, "__version__", "0.2.1")
+        except ImportError:
+            version = "0.2.1"
+
         line, too_long, previous_cr = "", False, False
-        writer.write(_PROMPT)
+        esc_state, csi_has_param = 0, False
+        writer.write("MicroMeerschaum " + version + "\n" + make_prompt())
         while True:
             try:
                 char = reader.read(1)
@@ -402,7 +503,8 @@ class ActionRegistry:
                 char = "\x03"
             if char == "\x03":
                 line, too_long, previous_cr = "", False, False
-                writer.write("^C\n" + _PROMPT)
+                esc_state, csi_has_param, hist_pos = 0, False, 0
+                writer.write("^C\n" + make_prompt())
                 continue
             if not char or (char == "\x04" and not line and not too_long):
                 break
@@ -411,27 +513,94 @@ class ActionRegistry:
                 continue
             previous_cr = char == "\r"
             if char in ("\n", "\r"):
+                esc_state, csi_has_param, hist_pos = 0, False, 0
                 writer.write("\n")
+                stripped = line.strip()
                 if too_long:
-                    writer.write("action line too long\n")
-                elif line.strip() in ("exit", "quit"):
+                    writer.write(format_reply(False, "action line too long"))
+                elif stripped in ("exit", "quit"):
                     return
-                elif line.strip():
-                    if line.endswith("?"):
+                elif stripped:
+                    push_history(stripped)
+                    if stripped == "clear":
+                        writer.write("\x1b[2J\x1b[H")
+                    elif stripped == "instance" or (stripped.startswith("instance") and stripped[8] in " \t"):
+                        rest = stripped[8:].strip()
+                        if not rest:
+                            writer.write(format_reply(True, active_instance))
+                        else:
+                            parts = [w for w in rest.replace("\t", " ").split(" ") if w]
+                            if len(parts) != 1:
+                                writer.write(format_reply(False, "Usage: instance [KEYS|all|default|reset]"))
+                            elif parts[0] in ("all", "default", "reset"):
+                                active_instance = default_instance
+                                filter_instance = False
+                                writer.write(format_reply(True, "Active instance: " + active_instance))
+                            elif not valid_instance(parts[0]):
+                                writer.write(format_reply(False, "invalid instance keys"))
+                            else:
+                                active_instance = parts[0]
+                                filter_instance = True
+                                writer.write(format_reply(True, "Active instance: " + active_instance))
+                    elif stripped.endswith("?"):
                         try:
-                            message = "\n".join(self.complete(line[:-1]))
+                            matches = self.complete(stripped[:-1])
+                            if matches:
+                                writer.write(format_reply(True, "\n".join(matches)))
+                            else:
+                                writer.write(format_reply(False, "no matching actions"))
                         except ValueError as e:
-                            message = str(e)
+                            writer.write(format_reply(False, str(e)))
                     else:
-                        _, message = self.dispatch(line)
-                    writer.write(message + "\n")
+                        ok, message = self.dispatch(scope_line(line))
+                        writer.write(format_reply(ok, message))
                 line, too_long = "", False
-                writer.write(_PROMPT)
+                writer.write(make_prompt())
             elif too_long:
                 continue
+            elif esc_state == 1:
+                if char == "[":
+                    esc_state, csi_has_param = 2, False
+                elif char == "O":
+                    esc_state = 3
+                else:
+                    esc_state = 0
+            elif esc_state == 2:
+                code = ord(char)
+                if 0x20 <= code <= 0x3F:
+                    csi_has_param = True
+                else:
+                    esc_state = 0
+                    if not csi_has_param and char == "A" and history:
+                        if hist_pos < len(history):
+                            hist_pos += 1
+                            line = replace_line(line, history[-hist_pos])
+                    elif not csi_has_param and char == "B" and history:
+                        if hist_pos > 1:
+                            hist_pos -= 1
+                            line = replace_line(line, history[-hist_pos])
+                        elif hist_pos == 1:
+                            hist_pos = 0
+                            line = replace_line(line, "")
+            elif esc_state == 3:
+                esc_state = 0
+                if char == "A" and history:
+                    if hist_pos < len(history):
+                        hist_pos += 1
+                        line = replace_line(line, history[-hist_pos])
+                elif char == "B" and history:
+                    if hist_pos > 1:
+                        hist_pos -= 1
+                        line = replace_line(line, history[-hist_pos])
+                    elif hist_pos == 1:
+                        hist_pos = 0
+                        line = replace_line(line, "")
+            elif char == "\x1b":
+                esc_state = 1
             elif char in ("\b", "\x7f"):
                 if line:
                     line = line[:-1]
+                    hist_pos = 0
                     writer.write("\b \b")
             elif char == "\t":
                 try:
@@ -440,9 +609,11 @@ class ActionRegistry:
                     matches = []
                 if len(matches) == 1:
                     line = matches[0] + " "
-                writer.write("\n" + "\n".join(matches) + "\n" + _PROMPT + line)
+                    hist_pos = 0
+                writer.write("\n" + "\n".join(matches) + "\n" + make_prompt() + line)
             elif ord(char) >= 32:
                 line += char
+                hist_pos = 0
                 if len(line.encode()) > MAX_LINE:
                     too_long = True
                 else:

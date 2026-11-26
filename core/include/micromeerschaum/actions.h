@@ -10,11 +10,23 @@ extern "C" {
 #endif
 
 /* Use the same limits in all translation units. The line length excludes its terminator. */
+#ifndef MM_VERSION
+#define MM_VERSION "0.2.1"
+#endif
 #ifndef MM_ACTION_MAX_LINE
 #define MM_ACTION_MAX_LINE 4224u
 #endif
 #ifndef MM_ACTION_MAX_ARGS
 #define MM_ACTION_MAX_ARGS 32u
+#endif
+#ifndef MM_ACTION_SHELL_HISTORY
+#define MM_ACTION_SHELL_HISTORY 8u
+#endif
+#ifndef MM_ACTION_SHELL_HISTORY_LINE
+#define MM_ACTION_SHELL_HISTORY_LINE 255u
+#endif
+#ifndef MM_ACTION_SHELL_INSTANCE_MAX
+#define MM_ACTION_SHELL_INSTANCE_MAX 63u
 #endif
 
 typedef struct mm_action_view mm_action_view;
@@ -102,20 +114,39 @@ size_t mm_actions_complete(const mm_action_view *, const char *prefix, size_t le
                            mm_action_candidate_fn, void *user);
 
 typedef struct {
+    const char *instance; /* initial instance label; NULL defaults to "journal:local" */
+    const char *version;  /* greeting version string; NULL defaults to MM_VERSION */
+    bool ansi;            /* enable ANSI color codes on prompt and status markers */
+    bool unicode;         /* use UTF-8 arrow instead of '>' in prompt */
+} mm_action_shell_options;
+
+typedef struct {
     mm_action_view view;
     mm_action_workspace work;
     mm_action_output reply;
     mm_action_mode mode;
     size_t len;
     bool echo, active, discard, after_cr;
+    bool ansi, unicode, filter_instance, csi_has_param;
+    unsigned char esc_state;
+    char default_instance[MM_ACTION_SHELL_INSTANCE_MAX + 1u];
+    char instance[MM_ACTION_SHELL_INSTANCE_MAX + 1u];
+    size_t hist_count, hist_head, hist_pos;
+    char history[MM_ACTION_SHELL_HISTORY][MM_ACTION_SHELL_HISTORY_LINE + 1u];
     char line[MM_ACTION_MAX_LINE + 1u];
 } mm_action_shell;
 
-/* Emits the initial prompt. Feed one byte at a time. false means the session
- * ended (exit, Ctrl-D on an empty line, or output failure). The caller owns I/O.
- * Turn echo off if the terminal driver already performs character echo. */
+/* Emits the greeting and initial prompt. Feed one byte at a time. false means
+ * the session ended (exit, Ctrl-D on an empty line, or output failure). The
+ * caller owns I/O. Turn echo off if the terminal driver already echoes input. */
 bool mm_action_shell_init(mm_action_shell *, mm_action_view, mm_action_mode,
                           char *reply, size_t capacity, mm_action_emit_fn, void *user, bool echo);
+bool mm_action_shell_init_ex(mm_action_shell *, mm_action_view, mm_action_mode,
+                             char *reply, size_t capacity, mm_action_emit_fn, void *user,
+                             bool echo, const mm_action_shell_options *options);
+/* Switch active default instance for subsequent pipe commands, or pass NULL to
+ * reset to the initial instance without an automatic -i filter. */
+bool mm_action_shell_set_instance(mm_action_shell *, const char *instance);
 bool mm_action_shell_feed(mm_action_shell *, unsigned char byte);
 
 #ifdef __cplusplus
