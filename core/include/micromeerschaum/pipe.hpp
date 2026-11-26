@@ -4,6 +4,9 @@
 
 #include <type_traits>
 #include "micromeerschaum/pipe.h"
+#if defined(MICROMEERSCHAUM_SQLITE_H) || defined(MM_WITH_SQLITE)
+#include "micromeerschaum/sqlite.h"
+#endif
 
 namespace mm {
 template<size_t N, typename T>
@@ -90,5 +93,105 @@ public:
         return mm_pipe_sync_source(&pipe_, mono_us, boot);
     }
 };
+
+#if defined(MICROMEERSCHAUM_SQLITE_H) || defined(MM_WITH_SQLITE)
+inline mm_sqlite_query sqlite_query(size_t limit = MM_SQLITE_MAX_LIMIT, bool desc = false,
+                                    const mm_value *begin = nullptr, const mm_value *end = nullptr,
+                                    const mm_sqlite_filter *filters = nullptr,
+                                    size_t filter_count = 0) {
+    mm_sqlite_query q{};
+    q.begin = begin;
+    q.end = end;
+    q.filters = filters;
+    q.filter_count = filter_count;
+    q.limit = limit;
+    q.desc = desc;
+    return q;
+}
+
+template<size_t N>
+inline mm_sqlite_query sqlite_query(const mm_sqlite_filter (&filters)[N],
+                                    size_t limit = MM_SQLITE_MAX_LIMIT, bool desc = false,
+                                    const mm_value *begin = nullptr,
+                                    const mm_value *end = nullptr) {
+    return sqlite_query(limit, desc, begin, end, filters, N);
+}
+
+inline const mm_sqlite_definition *sqlite_definition(const mm_sqlite *db) {
+    return mm_sqlite_definition_get(db);
+}
+
+inline mm_journal_status sqlite_rowcount(mm_sqlite *db, uint64_t &count,
+                                         const mm_sqlite_query &query = mm_sqlite_query{}) {
+    return mm_sqlite_get_rowcount(db, &query, &count);
+}
+
+inline mm_journal_status sqlite_sync_time(mm_sqlite *db, mm_value &result,
+                                          const mm_sqlite_query &query = mm_sqlite_query{}) {
+    return mm_sqlite_get_sync_time(db, &query, &result);
+}
+
+class SqliteCursor {
+    mm_sqlite_cursor *cursor_ = nullptr;
+public:
+    SqliteCursor() = default;
+    ~SqliteCursor() { close(); }
+    SqliteCursor(const SqliteCursor &) = delete;
+    SqliteCursor &operator=(const SqliteCursor &) = delete;
+    SqliteCursor(SqliteCursor &&other) noexcept : cursor_(other.cursor_) {
+        other.cursor_ = nullptr;
+    }
+    SqliteCursor &operator=(SqliteCursor &&other) noexcept {
+        if (this != &other) {
+            close();
+            cursor_ = other.cursor_;
+            other.cursor_ = nullptr;
+        }
+        return *this;
+    }
+    void close() {
+        mm_sqlite_cursor_close(cursor_);
+        cursor_ = nullptr;
+    }
+    mm_journal_status next(mm_row &row) { return mm_sqlite_next(cursor_, &row); }
+    mm_sqlite_cursor *get() const { return cursor_; }
+    explicit operator bool() const { return cursor_ != nullptr; }
+    mm_sqlite_cursor **reset_and_put() {
+        close();
+        return &cursor_;
+    }
+};
+
+class SqlitePipe : public Pipe {
+    mm_sqlite *db_ = nullptr;
+public:
+    using Pipe::open;
+    mm_journal_status open(const char *connector, const char *metric, const char *location,
+                           mm_sqlite *db, uint8_t *scratch, size_t capacity) {
+        db_ = nullptr;
+        mm_journal_status st = Pipe::open(connector, metric, location, mm_sqlite_target(db),
+                                          scratch, capacity);
+        if (st == MM_JOURNAL_OK) db_ = db;
+        return st;
+    }
+    mm_sqlite *sqlite() const { return db_; }
+    const mm_sqlite_definition *definition() const { return mm_sqlite_definition_get(db_); }
+    mm_journal_status get_rowcount(uint64_t &count,
+                                   const mm_sqlite_query &query = mm_sqlite_query{}) const {
+        return mm_sqlite_get_rowcount(db_, &query, &count);
+    }
+    mm_journal_status get_sync_time(mm_value &result,
+                                    const mm_sqlite_query &query = mm_sqlite_query{}) const {
+        return mm_sqlite_get_sync_time(db_, &query, &result);
+    }
+    mm_journal_status get_docs(SqliteCursor &cursor, const mm_sqlite_query &query) const {
+        return mm_sqlite_get_docs(db_, &query, cursor.reset_and_put());
+    }
+    mm_journal_status get_docs(SqliteCursor &cursor, size_t limit = MM_SQLITE_MAX_LIMIT,
+                               bool desc = false) const {
+        return get_docs(cursor, sqlite_query(limit, desc));
+    }
+};
+#endif
 } // namespace mm
 #endif

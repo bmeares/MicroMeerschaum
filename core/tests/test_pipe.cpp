@@ -144,11 +144,110 @@ static void binary_driver()
     CHECK(!ec);
 }
 
+#ifdef MM_WITH_SQLITE
+static void sqlite_wrapper()
+{
+    char dir[] = "/tmp/mm-pipe-sql-XXXXXX";
+    CHECK(mkdtemp(dir));
+    std::string db_path = std::string(dir) + "/device.db";
+    char key[MM_KEY_MAX];
+    size_t key_len;
+    CHECK(mm_pipe_key(key, sizeof key, &key_len, "sensor", "temperature", "lab") == MM_OK);
+    const mm_journal_config cfg = {{3, 1, key, key_len}, MM_JOURNAL_ORIGIN,
+                                   MM_DESTINATION, 9, 9, 0};
+    const mm_sqlite_column cols[] = {
+        {"tick", MM_VALUE_INT, false},
+        {"station", MM_VALUE_TEXT, true},
+        {"celsius", MM_VALUE_FLOAT, false},
+    };
+    const mm_sqlite_definition def = {cols, 3, 0, false};
+    mm_sqlite *db = nullptr;
+    CHECK(mm_sqlite_open(&db, db_path.c_str(), &cfg, &def) == MM_JOURNAL_OK);
+
+    mm::SqlitePipe pipe;
+    uint8_t scratch[256];
+    CHECK(pipe.open("sensor", "wrong", "lab", db, scratch, sizeof scratch) == MM_JOURNAL_CONFLICT);
+    CHECK(pipe.sqlite() == nullptr);
+    CHECK(pipe.open("sensor", "temperature", "lab", db, scratch, sizeof scratch) == MM_JOURNAL_OK);
+    CHECK(pipe.sqlite() == db);
+
+    const mm_sqlite_definition *d = pipe.definition();
+    CHECK(d != nullptr && d == mm::sqlite_definition(db));
+    CHECK(d->count == 3 && d->axis == 0 && !d->autotime);
+    CHECK(std::strcmp(d->columns[1].name, "station") == 0 && d->columns[1].key);
+
+    const mm_field r1[] = {mm::field("tick", 1), mm::field("station", "A"), mm::field("celsius", 20.0)};
+    const mm_field r2[] = {mm::field("tick", 2), mm::field("station", "A"), mm::field("celsius", 21.0)};
+    const mm_field r3[] = {mm::field("tick", 2), mm::field("station", "B"), mm::field("celsius", 22.0)};
+    const mm_field r4[] = {mm::field("tick", 1), mm::field("station", "A"), mm::field("celsius", 25.0)};
+    const mm_row rows[] = {mm::row(r1), mm::row(r2), mm::row(r3), mm::row(r4)};
+    CHECK(pipe.sync(rows, 10, 1).confirmed == 4);
+
+    uint64_t count = 0;
+    CHECK(pipe.get_rowcount(count) == MM_JOURNAL_OK && count == 3);
+    CHECK(mm::sqlite_rowcount(db, count) == MM_JOURNAL_OK && count == 3);
+
+    mm_value st_a{};
+    st_a.type = MM_VALUE_TEXT;
+    st_a.as.text = mm_text{"A", 1};
+    const mm_sqlite_filter flt[] = {{"station", &st_a, 1}};
+    CHECK(pipe.get_rowcount(count, mm::sqlite_query(flt)) == MM_JOURNAL_OK && count == 2);
+
+    const mm_sqlite_filter empty_flt[] = {{"station", nullptr, 0}};
+    CHECK(pipe.get_rowcount(count, mm::sqlite_query(empty_flt)) == MM_JOURNAL_OK && count == 0);
+
+    const mm_sqlite_filter bad_flt[] = {{"unknown", &st_a, 1}};
+    CHECK(pipe.get_rowcount(count, mm::sqlite_query(bad_flt)) == MM_JOURNAL_INVALID);
+
+    mm_value latest{};
+    CHECK(pipe.get_sync_time(latest, mm::sqlite_query(flt)) == MM_JOURNAL_OK);
+    CHECK(latest.type == MM_VALUE_INT && latest.as.integer == 2);
+    CHECK(mm::sqlite_sync_time(db, latest) == MM_JOURNAL_OK && latest.as.integer == 2);
+
+    {
+        mm::SqliteCursor cursor;
+        mm_row row{};
+        CHECK(pipe.get_docs(cursor, 2, true) == MM_JOURNAL_OK && static_cast<bool>(cursor));
+        CHECK(cursor.next(row) == MM_JOURNAL_OK && row.fields[0].value.as.integer == 2 &&
+              row.fields[2].value.as.real == 22.0);
+        CHECK(cursor.next(row) == MM_JOURNAL_OK && row.fields[0].value.as.integer == 2 &&
+              row.fields[2].value.as.real == 21.0);
+        CHECK(cursor.next(row) == MM_JOURNAL_NOT_FOUND);
+
+        mm_value begin{};
+        begin.type = MM_VALUE_INT;
+        begin.as.integer = 1;
+        mm_value end{};
+        end.type = MM_VALUE_INT;
+        end.as.integer = 3;
+        CHECK(pipe.get_docs(cursor, mm::sqlite_query(flt, 10, true, &begin, &end)) == MM_JOURNAL_OK);
+        CHECK(cursor.next(row) == MM_JOURNAL_OK && row.fields[0].value.as.integer == 2 &&
+              row.fields[2].value.as.real == 21.0);
+        CHECK(cursor.next(row) == MM_JOURNAL_OK && row.fields[0].value.as.integer == 1 &&
+              row.fields[2].value.as.real == 25.0);
+        CHECK(cursor.next(row) == MM_JOURNAL_NOT_FOUND);
+    }
+
+    // Cursor closed via RAII, so further writes succeed immediately.
+    const mm_field r5[] = {mm::field("tick", 3), mm::field("station", "C"), mm::field("celsius", 23.0)};
+    CHECK(pipe.sync(mm::row(r5), 20, 1).confirmed == 1);
+    CHECK(pipe.get_rowcount(count) == MM_JOURNAL_OK && count == 4);
+
+    mm_sqlite_close(db);
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    CHECK(!ec);
+}
+#endif
+
 int main()
 {
     source_first_use();
     partial_commit();
     binary_driver();
+#ifdef MM_WITH_SQLITE
+    sqlite_wrapper();
+#endif
     char dir[] = "/tmp/mm-named-pipe-XXXXXX";
     CHECK(mkdtemp(dir));
     char key[MM_KEY_MAX];

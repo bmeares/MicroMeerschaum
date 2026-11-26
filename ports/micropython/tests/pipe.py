@@ -18,6 +18,24 @@ print("recovered two observations")
 from micromeerschaum import Timestamp
 assert p.read_doc(1) == {"tick": 41, "celsius": 21.4}
 assert p.read_doc(2) == {"tick": 42, "celsius": 21.7}
+assert p.columns == {}
+assert p.dtypes == {}
+assert p.get_columns_types() == {}
+assert p.get_rowcount() == 2
+assert p.get_rowcount(params={}) == 2
+assert p.get_docs(limit=2, order="asc") == [{"tick": 41, "celsius": 21.4}, {"tick": 42, "celsius": 21.7}]
+for bad_kw in ({"begin": 1}, {"end": 2}, {"params": {"tick": 41}}):
+    try:
+        p.get_rowcount(**bad_kw)
+        raise AssertionError("accepted journal rowcount filter")
+    except ValueError:
+        pass
+for bad_order in ("desc", "invalid"):
+    try:
+        p.get_docs(order=bad_order)
+        raise AssertionError("accepted unsupported journal order")
+    except ValueError:
+        pass
 assert p.sync({"tick": [1, 2], "celsius": [3]})[0] is False
 assert p.progress()["high"] == 2
 assert not p.sync()[0]
@@ -119,6 +137,7 @@ assert p.progress()["confirmed"] == 14 and dest.progress()["high"] == 14
 assert dest.read_record(14) == pending
 p.reclaim()
 assert p.progress()["high"] == 14
+assert p.get_rowcount() == 0
 print("provisioned peer copy, direct sync, lost reply and reboot")
 
 class Frame:
@@ -136,7 +155,14 @@ small = provision("sensor", "small", root + "/small.mm", 1, 8, 2,
 ok, message = small.sync(({"tick": i} for i in range(24)))
 assert not ok and small.confirmed_input == 16, message
 assert small.progress()["missed"] == 8
+assert small.get_rowcount() == 16
 small.close()
+keep_new = provision("sensor", "rolling", root + "/rolling.mm", 1, 8, 2,
+                     segments=2, segment_bytes=512, retention="keep-new", create=True)
+assert keep_new.sync(({"tick": i} for i in range(24)))[0]
+assert keep_new.get_rowcount() == len(keep_new.get_docs(limit=100)) < 24
+assert keep_new.get_rowcount() > 0
+keep_new.close()
 p.close()
 dest.close()
 print("frame adapter and durable overflow count")

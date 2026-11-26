@@ -77,6 +77,69 @@ static void reference_rows(void)
     assert(mm_sqlite_next(c,&r) == MM_JOURNAL_OK && r.fields[2].value.as.integer == 3);
     assert(mm_sqlite_next(c,&r) == MM_JOURNAL_NOT_FOUND);
     mm_sqlite_cursor_close(c);
+
+    /* Descending order: newest axis first, breaking ties by rowid DESC. */
+    mm_sqlite_query desc_q = {.limit=9, .desc=true};
+    assert(mm_sqlite_get_docs(store, &desc_q, &c) == MM_JOURNAL_OK);
+    const int64_t expected_ticks[] = {10000, 3, 3, 2, 1};
+    const int64_t expected_vals[]  = {33, 3, 2, 22, 44};
+    for (size_t i = 0; i < 5; ++i) {
+        assert(mm_sqlite_next(c, &r) == MM_JOURNAL_OK);
+        assert(r.fields[0].value.as.integer == expected_ticks[i]);
+        assert(r.fields[2].value.as.integer == expected_vals[i]);
+    }
+    assert(mm_sqlite_next(c, &r) == MM_JOURNAL_NOT_FOUND);
+    mm_sqlite_cursor_close(c);
+
+    /* Descending with bounds, filter, and limit. */
+    begin.as.integer = 1;
+    end.as.integer = 4;
+    desc_q.begin = &begin;
+    desc_q.end = &end;
+    desc_q.limit = 2;
+    assert(mm_sqlite_get_docs(store, &desc_q, &c) == MM_JOURNAL_OK);
+    assert(mm_sqlite_next(c, &r) == MM_JOURNAL_OK && r.fields[0].value.as.integer == 3 && r.fields[2].value.as.integer == 3);
+    assert(mm_sqlite_next(c, &r) == MM_JOURNAL_OK && r.fields[0].value.as.integer == 3 && r.fields[2].value.as.integer == 2);
+    assert(mm_sqlite_next(c, &r) == MM_JOURNAL_NOT_FOUND);
+    mm_sqlite_cursor_close(c);
+
+    /* Rowcount: unfiltered, half-open bounds, filters, NULL filter, empty filter list, and ignored limit. */
+    uint64_t count = 999;
+    mm_sqlite_query rc_q = {.limit = MM_SQLITE_MAX_LIMIT + 100};
+    assert(mm_sqlite_get_rowcount(store, &rc_q, &count) == MM_JOURNAL_OK && count == 5);
+    rc_q.limit = 0;
+    assert(mm_sqlite_get_rowcount(store, &rc_q, &count) == MM_JOURNAL_OK && count == 5);
+    rc_q.begin = &begin;
+    rc_q.end = &end;
+    assert(mm_sqlite_get_rowcount(store, &rc_q, &count) == MM_JOURNAL_OK && count == 4);
+    f.count = 2;
+    rc_q.filters = &f;
+    rc_q.filter_count = 1;
+    assert(mm_sqlite_get_rowcount(store, &rc_q, &count) == MM_JOURNAL_OK && count == 2);
+    mm_value null_val = {MM_VALUE_NULL, {0}};
+    mm_sqlite_filter null_f = {"sensor_id", &null_val, 1};
+    rc_q.filters = &null_f;
+    assert(mm_sqlite_get_rowcount(store, &rc_q, &count) == MM_JOURNAL_OK && count == 1);
+    mm_sqlite_filter empty_f = {"sensor_id", NULL, 0};
+    rc_q.filters = &empty_f;
+    count = 999;
+    assert(mm_sqlite_get_rowcount(store, &rc_q, &count) == MM_JOURNAL_OK && count == 0);
+
+    /* Rowcount validation errors. */
+    assert(mm_sqlite_get_rowcount(NULL, &rc_q, &count) == MM_JOURNAL_INVALID);
+    assert(mm_sqlite_get_rowcount(store, NULL, &count) == MM_JOURNAL_INVALID);
+    assert(mm_sqlite_get_rowcount(store, &rc_q, NULL) == MM_JOURNAL_INVALID);
+    mm_value bad_bound = {MM_VALUE_TEXT, {.text={"x", 1}}};
+    mm_sqlite_query bad_q = {.begin = &bad_bound};
+    assert(mm_sqlite_get_rowcount(store, &bad_q, &count) == MM_JOURNAL_INVALID);
+    mm_sqlite_filter bad_col = {"missing", &ids[0], 1};
+    bad_q = (mm_sqlite_query){.filters = &bad_col, .filter_count = 1};
+    assert(mm_sqlite_get_rowcount(store, &bad_q, &count) == MM_JOURNAL_INVALID);
+    mm_value bad_type = {MM_VALUE_INT, {.integer = 7}};
+    mm_sqlite_filter bad_val = {"sensor_id", &bad_type, 1};
+    bad_q = (mm_sqlite_query){.filters = &bad_val, .filter_count = 1};
+    assert(mm_sqlite_get_rowcount(store, &bad_q, &count) == MM_JOURNAL_INVALID);
+
     mm_sqlite_close(store);
 }
 
@@ -126,6 +189,8 @@ static void generated_axis(void)
     assert(open_pipe(&def)==MM_JOURNAL_OK);
     mm_sqlite_query q = {.limit=2};
     mm_value latest;
+    uint64_t count = 7;
+    assert(mm_sqlite_get_rowcount(store,&q,&count)==MM_JOURNAL_OK && count==0);
     assert(mm_sqlite_get_sync_time(store,&q,&latest)==MM_JOURNAL_OK && latest.type==MM_VALUE_NULL);
     const mm_field field={{"value",5},{MM_VALUE_INT,{.integer=13}}};
     mm_row batch[]={{&field,1},{&field,1}};

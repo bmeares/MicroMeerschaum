@@ -50,6 +50,7 @@ typedef struct {
     const mm_sqlite_filter *filters; /* AND across named columns. */
     size_t filter_count;
     size_t limit; /* Explicit 0..MM_SQLITE_MAX_LIMIT for get_docs. */
+    bool desc; /* Order newest-first by axis and insertion order. */
 } mm_sqlite_query;
 
 /* Each row borrows the cursor's storage until the next step or close.
@@ -61,6 +62,9 @@ void mm_sqlite_cursor_close(mm_sqlite_cursor *cursor);
 /* Returns a NULL value for an empty selection. Ignores query.limit. */
 mm_journal_status mm_sqlite_get_sync_time(mm_sqlite *db, const mm_sqlite_query *query,
                                           mm_value *result);
+/* Count matching rows using the same bounds and filters. Ignores query.limit. */
+mm_journal_status mm_sqlite_get_rowcount(mm_sqlite *db, const mm_sqlite_query *query,
+                                         uint64_t *count);
 
 mm_journal_status mm_sqlite_positions(mm_sqlite *db, uint64_t *high, uint64_t *confirmed);
 mm_journal_status mm_sqlite_read(mm_sqlite *db, uint64_t seq, uint8_t *out, size_t cap,

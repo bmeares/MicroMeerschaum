@@ -65,10 +65,99 @@ def provision_peer(name, issuer, exchange, cap=4096, max_records=8):
     _peers[name] = (issuer, exchange, cap, max_records)
 
 
+_SQL_DTYPES = ("bool", "int", "float", "string", "datetime")
+
+
+def _sql_col_name(name):
+    if not isinstance(name, str) or not name or "\x00" in name or len(name.encode()) > 63:
+        raise ValueError("invalid SQLite column name")
+    return name
+
+
+def _normalize_sql_schema(columns, axis, dtypes, autotime):
+    dict_form = isinstance(columns, dict) or dtypes is not None
+    if dict_form:
+        if columns is not None and not isinstance(columns, dict):
+            raise ValueError("cannot mix tuple columns with dtypes dictionary")
+        if not isinstance(dtypes, dict) or not dtypes:
+            raise ValueError("dtypes must be a non-empty dictionary")
+        if len(dtypes) > 16:
+            raise ValueError("invalid column count")
+        extra_keys = set()
+        resolved_axis = None
+        if axis is not None:
+            resolved_axis = _sql_col_name(axis)
+        if columns is not None:
+            for role, target in columns.items():
+                if not isinstance(role, str) or not role:
+                    raise ValueError("invalid columns key")
+                if target is None:
+                    continue
+                target = _sql_col_name(target)
+                if role == "datetime":
+                    if resolved_axis is not None and resolved_axis != target:
+                        raise ValueError("axis conflicts with columns['datetime']")
+                    resolved_axis = target
+                else:
+                    if target in extra_keys:
+                        raise ValueError("duplicate key column")
+                    extra_keys.add(target)
+        if resolved_axis is None:
+            raise ValueError("datetime axis column is required")
+        if resolved_axis in extra_keys:
+            raise ValueError("duplicate key column")
+        normalized = []
+        items = [(_sql_col_name(name), dtype_name) for name, dtype_name in dtypes.items()]
+        if type(dtypes) is dict:
+            # MicroPython plain dicts are unordered; keep a deterministic order across reopens.
+            items.sort(key=lambda pair: (0 if pair[0] == resolved_axis else 1, pair[0]))
+        for name, dtype_name in items:
+            if not isinstance(dtype_name, str) or dtype_name not in _SQL_DTYPES:
+                raise ValueError("unsupported SQLite dtype")
+            normalized.append((name, dtype_name, name in extra_keys))
+        if resolved_axis not in dtypes:
+            raise ValueError("axis column must appear in dtypes")
+        for key_col in extra_keys:
+            if key_col not in dtypes:
+                raise ValueError("key column must appear in dtypes")
+        axis_dtype = dtypes[resolved_axis]
+    else:
+        if columns is None or axis is None:
+            raise ValueError("columns and axis are required")
+        if isinstance(columns, (str, bytes, bytearray)) or not isinstance(columns, (tuple, list)):
+            raise ValueError("columns must be a dict or sequence of (name, dtype, is_key)")
+        if not columns or len(columns) > 16:
+            raise ValueError("invalid column count")
+        resolved_axis = _sql_col_name(axis)
+        normalized = []
+        seen = set()
+        axis_dtype = None
+        for item in columns:
+            if not isinstance(item, (tuple, list)) or len(item) != 3:
+                raise ValueError("column entry must be (name, dtype, is_key)")
+            name = _sql_col_name(item[0])
+            dtype_name = item[1]
+            if not isinstance(dtype_name, str) or dtype_name not in _SQL_DTYPES:
+                raise ValueError("unsupported SQLite dtype")
+            if name in seen:
+                raise ValueError("duplicate SQLite column")
+            seen.add(name)
+            if name == resolved_axis:
+                axis_dtype = dtype_name
+            normalized.append((name, dtype_name, bool(item[2])))
+        if axis_dtype is None:
+            raise ValueError("axis column must appear in columns")
+    if axis_dtype not in ("int", "datetime"):
+        raise ValueError("axis dtype must be int or datetime")
+    if autotime and axis_dtype != "datetime":
+        raise ValueError("autotime requires datetime axis")
+    return resolved_axis, tuple(normalized)
+
+
 def provision(connector, metric, path, origin, generation, destination, location=None,
               instance=_local, receiver=False, segments=16, segment_bytes=4096,
               retention="keep-old", create=False, boot=0, custodian=None,
-              columns=None, axis=None, autotime=False):
+              columns=None, axis=None, dtypes=None, autotime=False):
     pipe = Pipe(connector, metric, location, instance)
     if pipe._id() in _stores or any(c.path == path for c in _stores.values()):
         raise ValueError("close the Pipe before provisioning it again")
@@ -78,11 +167,21 @@ def provision(connector, metric, path, origin, generation, destination, location
         if receiver or retention != "keep-old":
             raise ValueError("sql:local requires an originating Pipe with keep-old retention")
         import _mmsqlite
+        has_schema = columns is not None or axis is not None or dtypes is not None or autotime
+        expected = None
+        if create or has_schema:
+            axis, columns = _normalize_sql_schema(columns, axis, dtypes, autotime)
+            if not create:
+                expected = (axis, columns, bool(autotime))
         store = _mmsqlite.open(path, pipe._wire, origin, generation, destination,
-                              columns, axis, autotime, create, custodian)
+                               columns if create else None, axis if create else None,
+                               bool(autotime) if create else False, create, custodian)
+        if expected is not None and store.definition() != expected:
+            store.close()
+            raise OSError("sqlite: conflict")
         budget = segment_bytes
     elif instance.startswith("journal:"):
-        if columns is not None or axis is not None or autotime:
+        if columns is not None or axis is not None or dtypes is not None or autotime:
             raise ValueError("row registration requires sql:local")
         store = _mm.open_volume(path, pipe._wire, origin, generation, destination, receiver,
                                 segments, segment_bytes, retention == "keep-new", create, custodian)
@@ -451,6 +550,30 @@ class Pipe:
         """Copy pending original records to a compatible provisioned peer Pipe."""
         return self.deliver(instance)
 
+    @property
+    def columns(self):
+        """Key column mapping for sql:local pipes, or {} for journal pipes."""
+        if self.instance_keys != "sql:local":
+            return {}
+        axis, cols, _ = self._config().store.definition()
+        result = {"datetime": axis}
+        for name, _, is_key in cols:
+            if is_key and name != axis:
+                result[name] = name
+        return result
+
+    def get_columns_types(self):
+        """Declared column dtypes for sql:local pipes, or {} for journal pipes."""
+        if self.instance_keys != "sql:local":
+            return {}
+        _, cols, _ = self._config().store.definition()
+        return {name: dtype_name for name, dtype_name, _ in cols}
+
+    @property
+    def dtypes(self):
+        """Declared column dtypes for sql:local pipes, or {} for journal pipes."""
+        return self.get_columns_types()
+
     def _retained_docs(self, limit, record_limit):
         store = self._config().store
         seq = 1
@@ -464,10 +587,14 @@ class Pipe:
                 yield _mm.decode(memoryview(record)[32:])
                 limit -= 1
 
-    def get_docs(self, begin=None, end=None, params=None, limit=100):
+    def get_docs(self, begin=None, end=None, params=None, limit=100, order="asc"):
         """Read current SQLite rows or the oldest retained journal documents."""
+        if order not in ("asc", "desc"):
+            raise ValueError("order must be 'asc' or 'desc'")
         if self.instance_keys == "sql:local":
-            return self._config().store.docs(begin, end, params, limit)
+            return self._config().store.docs(begin, end, params, limit, desc=(order == "desc"))
+        if order != "asc":
+            raise ValueError("journal reads support ascending order only")
         if type(limit) is not int or not 0 <= limit <= 1024:
             raise ValueError("invalid read limit")
         if begin is not None or end is not None or params not in (None, {}):
@@ -478,6 +605,25 @@ class Pipe:
         """Read a single document, or None when no matching documents exist."""
         docs = self.get_docs(begin=begin, end=end, params=params, limit=1)
         return docs[0] if docs else None
+
+    def get_rowcount(self, begin=None, end=None, params=None):
+        """Count matching SQLite rows or retained journal data records."""
+        if self.instance_keys == "sql:local":
+            return self._config().store.rowcount(begin, end, params)
+        if begin is not None or end is not None or params not in (None, {}):
+            raise ValueError("journal rowcount does not support filters")
+        store = self._config().store
+        count = 0
+        seq = 1
+        while seq < 1 << 64:
+            item = store.next_record(seq, 1 << 20)
+            if item is None:
+                break
+            seq, record = item
+            seq += 1
+            if record[3] == 0:
+                count += 1
+        return count
 
     def get_sync_time(self, params=None):
         """Latest matching SQLite axis value, as integer ticks or Unix microseconds."""

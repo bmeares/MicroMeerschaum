@@ -34,10 +34,12 @@ static bool filter_value(mm_value v, mm_value_type t)
         mm_utf8_valid((const uint8_t *)v.as.text.data, v.as.text.len));
 }
 
-static mm_journal_status select_rows(mm_sqlite *db, const mm_sqlite_query *q, bool latest,
+typedef enum { SELECT_DOCS, SELECT_LATEST, SELECT_COUNT } select_mode;
+
+static mm_journal_status select_rows(mm_sqlite *db, const mm_sqlite_query *q, select_mode mode,
                                      sqlite3_stmt **s)
 {
-    if (!db || !q || (!latest && q->limit > MM_SQLITE_MAX_LIMIT) ||
+    if (!db || !q || (mode == SELECT_DOCS && q->limit > MM_SQLITE_MAX_LIMIT) ||
         q->filter_count > MM_SQLITE_MAX_COLUMNS || (q->filter_count && !q->filters)) return MM_JOURNAL_INVALID;
     if (db->uncertain) return MM_JOURNAL_UNCERTAIN;
     int axis = (int)db->def.axis;
@@ -59,7 +61,8 @@ static mm_journal_status select_rows(mm_sqlite *db, const mm_sqlite_query *q, bo
 
     sqlite3_str *sql = sqlite3_str_new(db->conn);
     sqlite3_str_appendall(sql, "SELECT ");
-    if (latest) sqlite3_str_appendf(sql, "MAX(c%d)", axis);
+    if (mode == SELECT_LATEST) sqlite3_str_appendf(sql, "MAX(c%d)", axis);
+    else if (mode == SELECT_COUNT) sqlite3_str_appendall(sql, "COUNT(*)");
     else for (size_t i = 0; i < db->def.count; ++i)
         sqlite3_str_appendf(sql, "%sc%d", i ? "," : "", (int)i);
     sqlite3_str_appendall(sql, " FROM mm_rows WHERE 1");
@@ -72,7 +75,10 @@ static mm_journal_status select_rows(mm_sqlite *db, const mm_sqlite_query *q, bo
         for (size_t j = 0; j < n; ++j) sqlite3_str_appendf(sql, "%sc%d IS ?", j?" OR ":"", indices[i]);
         sqlite3_str_appendall(sql, ")");
     }
-    if (!latest) sqlite3_str_appendf(sql, " ORDER BY c%d,rowid LIMIT %d", axis, (int)q->limit);
+    if (mode == SELECT_DOCS)
+        sqlite3_str_appendf(sql, q->desc ? " ORDER BY c%d DESC,rowid DESC LIMIT %d"
+                                         : " ORDER BY c%d,rowid LIMIT %d",
+                            axis, (int)q->limit);
     int rc = mm_sql_prepare_built(db, sql, s), slot = 1;
     if (rc == SQLITE_OK && q->begin) rc = mm_sql_bind(*s, slot++, *q->begin);
     if (rc == SQLITE_OK && q->end) rc = mm_sql_bind(*s, slot++, *q->end);
@@ -116,7 +122,7 @@ mm_journal_status mm_sqlite_get_docs(mm_sqlite *db, const mm_sqlite_query *q, mm
     if (!out) return MM_JOURNAL_INVALID;
     *out = NULL;
     sqlite3_stmt *s = NULL;
-    mm_journal_status st = select_rows(db, q, false, &s);
+    mm_journal_status st = select_rows(db, q, SELECT_DOCS, &s);
     if (st != MM_JOURNAL_OK) { sqlite3_finalize(s); return st; }
     mm_sqlite_cursor *c = calloc(1, sizeof *c);
     if (!c) { sqlite3_finalize(s); return MM_JOURNAL_NOMEM; }
@@ -157,10 +163,34 @@ mm_journal_status mm_sqlite_get_sync_time(mm_sqlite *db, const mm_sqlite_query *
     if (!out) return MM_JOURNAL_INVALID;
     *out = (mm_value){MM_VALUE_NULL, {0}};
     sqlite3_stmt *s = NULL;
-    mm_journal_status st = select_rows(db, q, true, &s);
+    mm_journal_status st = select_rows(db, q, SELECT_LATEST, &s);
     if (st == MM_JOURNAL_OK) {
         int rc = sqlite3_step(s);
         st = rc == SQLITE_ROW ? read_value(s, 0, db->columns[db->def.axis].type, out) : mm_sql_status(rc);
+    }
+    sqlite3_finalize(s);
+    return st;
+}
+
+mm_journal_status mm_sqlite_get_rowcount(mm_sqlite *db, const mm_sqlite_query *q, uint64_t *count)
+{
+    if (!count) return MM_JOURNAL_INVALID;
+    *count = 0;
+    sqlite3_stmt *s = NULL;
+    mm_journal_status st = select_rows(db, q, SELECT_COUNT, &s);
+    if (st == MM_JOURNAL_OK) {
+        int rc = sqlite3_step(s);
+        if (rc == SQLITE_ROW) {
+            if (sqlite3_column_type(s, 0) != SQLITE_INTEGER) {
+                st = MM_JOURNAL_CORRUPT;
+            } else {
+                int64_t n = sqlite3_column_int64(s, 0);
+                if (n < 0) st = MM_JOURNAL_CORRUPT;
+                else *count = (uint64_t)n;
+            }
+        } else {
+            st = rc == SQLITE_DONE ? MM_JOURNAL_CORRUPT : mm_sql_status(rc);
+        }
     }
     sqlite3_finalize(s);
     return st;

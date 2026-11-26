@@ -31,10 +31,12 @@ static mm_sqlite *store(mp_obj_t self) {
     return obj->db;
 }
 
+static const char *const dtype_names[] = {NULL, "bool", "int", "float", "string", "datetime"};
+
 static mm_value_type dtype(mp_obj_t o) {
     const char *s = string(o);
-    static const char *const names[] = {NULL, "bool", "int", "float", "string", "datetime"};
-    for (unsigned i=1; i < MP_ARRAY_SIZE(names); ++i) if (!strcmp(s, names[i])) return (mm_value_type)i;
+    for (unsigned i=1; i < MP_ARRAY_SIZE(dtype_names); ++i)
+        if (!strcmp(s, dtype_names[i])) return (mm_value_type)i;
     mp_raise_ValueError(MP_ERROR_TEXT("unsupported SQLite dtype"));
 }
 
@@ -229,11 +231,41 @@ static void close_cursor(void *ctx) {
     mm_sqlite_cursor_close(((cursor_cleanup *)ctx)->cursor);
 }
 
-static mp_obj_t docs(size_t n, const mp_obj_t *a) {
-    size_t budget = n == 6 ? bounded(a[5], UINT32_MAX) : SIZE_MAX;
-    mm_sqlite *db=store(a[0]);
-    query_state *q=query(db,a[1],a[2],a[3]);
-    q->q.limit=bounded(a[4],MM_SQLITE_MAX_LIMIT);
+static mp_obj_t definition(mp_obj_t self) {
+    const mm_sqlite_definition *d = mm_sqlite_definition_get(store(self));
+    mp_obj_t cols[MM_SQLITE_MAX_COLUMNS];
+    for (size_t i = 0; i < d->count; ++i) {
+        const char *name = d->columns[i].name;
+        const char *type = dtype_names[d->columns[i].type];
+        mp_obj_t col[] = {
+            mp_obj_new_str(name, strlen(name)),
+            mp_obj_new_str(type, strlen(type)),
+            mp_obj_new_bool(d->columns[i].key),
+        };
+        cols[i] = mp_obj_new_tuple(3, col);
+    }
+    const char *axis = d->columns[d->axis].name;
+    mp_obj_t out[] = {
+        mp_obj_new_str(axis, strlen(axis)),
+        mp_obj_new_tuple(d->count, cols),
+        mp_obj_new_bool(d->autotime),
+    };
+    return mp_obj_new_tuple(3, out);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(definition_obj, definition);
+
+static mp_obj_t docs(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_budget, MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
+        { MP_QSTR_desc, MP_ARG_BOOL, {.u_bool = false} },
+    };
+    mm_sqlite *db = store(pos_args[0]);
+    mp_arg_val_t extra[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args - 5, pos_args + 5, kw_args, MP_ARRAY_SIZE(allowed), allowed, extra);
+    size_t budget = extra[0].u_obj == mp_const_none ? SIZE_MAX : bounded(extra[0].u_obj, UINT32_MAX);
+    query_state *q = query(db, pos_args[1], pos_args[2], pos_args[3]);
+    q->q.limit = bounded(pos_args[4], MM_SQLITE_MAX_LIMIT);
+    q->q.desc = extra[1].u_bool;
     mp_obj_t rows=mp_obj_new_list(0,NULL);
     cursor_cleanup ctx;
     check(mm_sqlite_get_docs(db,&q->q,&ctx.cursor));
@@ -257,7 +289,23 @@ static mp_obj_t docs(size_t n, const mp_obj_t *a) {
     if (st != MM_JOURNAL_NOT_FOUND) check(st);
     return rows;
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(docs_obj,5,6,docs);
+static MP_DEFINE_CONST_FUN_OBJ_KW(docs_obj,5,docs);
+
+static mp_obj_t rowcount(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_args) {
+    static const mp_arg_t allowed[] = {
+        { MP_QSTR_begin, MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
+        { MP_QSTR_end, MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
+        { MP_QSTR_params, MP_ARG_OBJ, {.u_rom_obj = MP_ROM_NONE} },
+    };
+    mm_sqlite *db = store(pos_args[0]);
+    mp_arg_val_t args[MP_ARRAY_SIZE(allowed)];
+    mp_arg_parse_all(n_args - 1, pos_args + 1, kw_args, MP_ARRAY_SIZE(allowed), allowed, args);
+    query_state *q = query(db, args[0].u_obj, args[1].u_obj, args[2].u_obj);
+    uint64_t count = 0;
+    check(mm_sqlite_get_rowcount(db, &q->q, &count));
+    return mp_obj_new_int_from_ull(count);
+}
+static MP_DEFINE_CONST_FUN_OBJ_KW(rowcount_obj,1,rowcount);
 
 static mp_obj_t sync_time(size_t n, const mp_obj_t *a) {
     mm_sqlite *db=store(a[0]);
@@ -277,7 +325,9 @@ static const mp_rom_map_elem_t methods[] = {
     {MP_ROM_QSTR(MP_QSTR_batch),MP_ROM_PTR(&batch_obj)},
     {MP_ROM_QSTR(MP_QSTR_confirm),MP_ROM_PTR(&confirm_obj)},
     {MP_ROM_QSTR(MP_QSTR_read_record),MP_ROM_PTR(&read_obj)},
+    {MP_ROM_QSTR(MP_QSTR_definition),MP_ROM_PTR(&definition_obj)},
     {MP_ROM_QSTR(MP_QSTR_docs),MP_ROM_PTR(&docs_obj)},
+    {MP_ROM_QSTR(MP_QSTR_rowcount),MP_ROM_PTR(&rowcount_obj)},
     {MP_ROM_QSTR(MP_QSTR_sync_time),MP_ROM_PTR(&time_obj)}
 };
 static MP_DEFINE_CONST_DICT(methods_dict,methods);
