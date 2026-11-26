@@ -30,6 +30,8 @@ class Device:
         self.writes = 0
         self.other_rows = []
         self.actions = []
+        self.allow_actions_op = True
+        self.allow_catalog_op = True
         self.running = True
         self.worker = threading.Thread(target=self.serve, daemon=True)
         self.worker.start()
@@ -52,21 +54,29 @@ class Device:
                 req = json.loads(packet[7:])
                 data, failure = None, None
                 if req["op"] == "catalog":
-                    items = [
-                        dict(
-                            id=i + 1,
-                            key=key,
-                            instance="journal:local",
-                            read=True,
-                            write=key != READ_ONLY,
+                    if not self.allow_catalog_op:
+                        failure = "operation unavailable"
+                    else:
+                        items = [
+                            dict(
+                                id=i + 1,
+                                key=key,
+                                instance="journal:local",
+                                read=True,
+                                write=key != READ_ONLY,
+                            )
+                            for i, key in enumerate((DEFAULT_KEY, READ_ONLY, OTHER_KEY))
+                        ]
+                        offset = req.get("offset", 0)
+                        # Exercise page continuation even when the host requested more entries.
+                        data = dict(
+                            items=items[offset : offset + 1], more=offset + 1 < len(items)
                         )
-                        for i, key in enumerate((DEFAULT_KEY, READ_ONLY, OTHER_KEY))
-                    ]
-                    offset = req.get("offset", 0)
-                    # Exercise page continuation even when the host requested more entries.
-                    data = dict(
-                        items=items[offset : offset + 1], more=offset + 1 < len(items)
-                    )
+                elif req["op"] == "actions":
+                    if not self.allow_actions_op:
+                        failure = "operation unavailable"
+                    else:
+                        data = ["show pipes", "help"]
                 elif req["op"] == "write":
                     self.writes += 1
                     assert req["key"] in (DEFAULT_KEY, OTHER_KEY)
@@ -192,27 +202,97 @@ def _open_shell_pty(extra_env=None, cols=80, rows=24):
     return master, proc, until, wait_prompt, drain_exit, full_output
 
 
+def _make_counting_python(root, real_python, log_path):
+    wrapper = root / "counting_python.py"
+    wrapper.write_text(
+        f"#!{real_python}\n"
+        "import os, sys\n"
+        f"with open({str(log_path)!r}, 'a') as f:\n"
+        "    f.write(f'{os.getpid()}\\n')\n"
+        f"os.execv({real_python!r}, [{real_python!r}, *sys.argv[1:]])\n"
+    )
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
 def shell(device):
-    # 1. Interactive styled TTY session: banner, styled prompt, toolbar, icons, conveniences,
-    #    history persistence, and clean close message.
+    root = Path(os.environ["MRSM_ROOT_DIR"])
+    base_cfg = json.loads(os.environ["MRSM_CONFIG"])
+    real_python = base_cfg["meerschaum"]["connectors"]["micro"]["bench"]["python"]
+    spawn_log = root / "transport_spawns.log"
+    counting_python = _make_counting_python(root, real_python, spawn_log)
+
+    def count_spawns():
+        if not spawn_log.exists():
+            return 0
+        return len(spawn_log.read_text().splitlines())
+
+    def counted_env():
+        cfg = json.loads(os.environ["MRSM_CONFIG"])
+        cfg["meerschaum"]["connectors"]["micro"]["bench"]["python"] = counting_python
+        return {"MRSM_CONFIG": json.dumps(cfg)}
+
+    # 1. Interactive styled TTY session: persistent transport reuse across completions & commands,
+    #    contextual flag/key Tab completion, banner, toolbar, icons, conveniences, disconnect safety,
+    #    reconnect on next command, history persistence, and clean close message.
     before_actions = list(device.actions)
-    master, proc, until, wait_prompt, drain_exit, _ = _open_shell_pty()
+    spawn_log.unlink(missing_ok=True)
+    master, proc, until, wait_prompt, drain_exit, _ = _open_shell_pty(extra_env=counted_env())
     try:
         frame = wait_prompt()
-        assert b"serial" in frame and b"disconnected" in frame, frame
+        assert b"serial" in frame and b"connected" in frame, frame
+        assert count_spawns() == 1, count_spawns()
+
         os.write(master, b"abandon\x03")
         wait_prompt()
+
+        # Action completion + execution over the same persistent session.
         os.write(master, b"sh\t")
         until(b"show pipes")
         os.write(master, b"\r")
         until(b"Ran show pipes")
         frame = wait_prompt()
         assert b"serial" in frame and b"connected" in frame, frame
+        assert count_spawns() == 1, count_spawns()
 
-        # Failure reply uses styled failure icon.
+        # Contextual Tab completion: long selector flag, -m metric key, -l location key,
+        # -c connector key, and -i instance key — all from cache with ZERO reconnects.
+        os.write(master, b"show pipes --me\t")
+        until(b"--metric-keys")
+        os.write(master, b" readi\t")
+        until(b"readings")
+        os.write(master, b" -l o\t")
+        until(b"outside")
+        os.write(master, b" -c s\t")
+        until(b"sensor")
+        os.write(master, b" -i j\t")
+        until(b"journal:local")
+        os.write(master, b"\r")
+        until(b"Ran show pipes --metric-keys readings -l outside -c sensor -i journal:local")
+        wait_prompt()
+        assert count_spawns() == 1, count_spawns()
+
+        # Null location key completes as None.
+        os.write(master, b"show pipes -l N\t")
+        until(b"None")
+        os.write(master, b"\r")
+        until(b"Ran show pipes -l None")
+        wait_prompt()
+        assert count_spawns() == 1, count_spawns()
+
+        # Flag menu after `-` suggests selector flags without spawning a transport.
+        os.write(master, b"show pipes -\t")
+        until(b"-c")
+        os.write(master, b"\x03")
+        wait_prompt()
+        assert count_spawns() == 1, count_spawns()
+
+        # Explicit device error uses styled failure icon and keeps the persistent session alive.
         os.write(master, b"refuse\r")
         until(b"Device refused this action")
-        wait_prompt()
+        frame = wait_prompt()
+        assert b"serial" in frame and b"connected" in frame, frame
+        assert count_spawns() == 1, count_spawns()
 
         # Local conveniences: clear, ?, <prefix>?, --help, leading mrsm stripping.
         os.write(master, b"clear\r")
@@ -239,6 +319,24 @@ def shell(device):
         os.write(master, b"mrsm show pipes\r")
         until(b"Ran show pipes")
         wait_prompt()
+        assert count_spawns() == 1, count_spawns()
+
+        # Mid-session link drop on an in-flight action: reports unknown outcome, marks toolbar
+        # disconnected, NEVER replays the interrupted action, and does NOT auto-reconnect.
+        disconnects_before = device.actions.count("disconnect")
+        os.write(master, b"disconnect\r")
+        until(b"Outcome unknown after sending action")
+        frame = wait_prompt()
+        assert b"serial" in frame and b"disconnected" in frame, frame
+        assert device.actions.count("disconnect") == disconnects_before + 1, device.actions
+        assert count_spawns() == 1, count_spawns()
+
+        # Next user-initiated command lazily reconnects a fresh persistent session.
+        os.write(master, b"show pipes\r")
+        until(b"Ran show pipes")
+        frame = wait_prompt()
+        assert b"serial" in frame and b"connected" in frame, frame
+        assert count_spawns() == 2, count_spawns()
 
         os.write(master, b"quit\r")
         output = drain_exit()
@@ -256,12 +354,16 @@ def shell(device):
     assert b"\x1b[94m" in output and b"Thank you for using" in output, output
     assert b"Device shell closed." not in output, output
 
-    # Confirm local commands (clear, ?, sh?) were not sent as device actions.
+    # Confirm local commands (clear, ?, sh?) were not sent as device actions and disconnect ran once.
     assert device.actions[len(before_actions) :] == [
         "show pipes",
+        "show pipes --metric-keys readings -l outside -c sensor -i journal:local",
+        "show pipes -l None",
         "refuse",
         "help show pipes",
         "help",
+        "show pipes",
+        "disconnect",
         "show pipes",
     ], device.actions[len(before_actions) :]
 
@@ -276,8 +378,8 @@ def shell(device):
     master, proc, until, wait_prompt, drain_exit, _ = _open_shell_pty()
     try:
         wait_prompt()
-        # Up twice skips "quit" and recalls "mrsm show pipes".
-        os.write(master, b"\x1b[A\x1b[A")
+        # Up 4 times skips "quit", "show pipes", "disconnect" and recalls "mrsm show pipes".
+        os.write(master, b"\x1b[A\x1b[A\x1b[A\x1b[A")
         until(b"mrsm show pipes")
         os.write(master, b"\r")
         until(b"Ran show pipes")
@@ -336,7 +438,7 @@ def shell(device):
     )
     try:
         frame = wait_prompt()
-        assert b" ] > " in frame and b"serial" in frame and b"disconnected" in frame, frame
+        assert b" ] > " in frame and b"serial" in frame and b"connected" in frame, frame
         os.write(master, b"show pipes\r")
         until(b" + Ran show pipes")
         wait_prompt()
@@ -351,17 +453,50 @@ def shell(device):
     assert b"MicroMeerschaum" in ascii_output and b"Thank you for using" in ascii_output, ascii_output
     assert re.search(rb"\x1b\[(?:[1-9][0-9;]*|0;[0-9;]+)m", ascii_output) is None, ascii_output
 
-    # 4. Piped (non-TTY) session: plain output, no banner, no close message, no toolbar, no ANSI.
+    # 3c. Graceful fallback when device session does not grant `actions` or `catalog`.
+    device.allow_actions_op = False
+    device.allow_catalog_op = False
+    spawn_log.unlink(missing_ok=True)
+    try:
+        master, proc, until, wait_prompt, drain_exit, _ = _open_shell_pty(extra_env=counted_env())
+        try:
+            frame = wait_prompt()
+            assert b"serial" in frame and b"connected" in frame, frame
+            os.write(master, b"sh\t")
+            until(b"show pipes")
+            os.write(master, b" --me\t")
+            until(b"--metric-keys")
+            os.write(master, b"\r")
+            until(b"Ran show pipes --metric-keys")
+            wait_prompt()
+            assert count_spawns() == 1, count_spawns()
+            os.write(master, b"quit\r")
+            drain_exit()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            os.close(master)
+    finally:
+        device.allow_actions_op = True
+        device.allow_catalog_op = True
+
+    # 4. Piped (non-TTY) session: plain output, no banner, no close message, no toolbar, no ANSI,
+    #    reusing one persistent transport session across all piped commands.
     piped_before = len(device.actions)
+    spawn_log.unlink(missing_ok=True)
+    piped_env = dict(os.environ, **counted_env())
     piped = subprocess.run(
         ["mrsm", "micro", "shell", "-i", "micro:bench"],
         cwd=os.environ["MRSM_ROOT_DIR"],
         input="show pipes\nclear\nsh?\nshow pipes --help\nmrsm show pipes\nexit\n",
         capture_output=True,
         text=True,
+        env=piped_env,
         timeout=40,
     )
     assert piped.returncode == 0, (piped.stdout, piped.stderr)
+    assert count_spawns() == 1, count_spawns()
     assert piped.stdout == "Ran show pipes\nshow pipes\nRan help show pipes\nRan show pipes\n", (
         piped.stdout,
         piped.stderr,
@@ -641,6 +776,51 @@ def helper_guard_tests(device, settings, python, recovery_token):
         and device.writes == 2
     )
     reconcile(incident)
+
+    # Persistent streaming session mode: ready handshake, multi-request reuse, DeviceError keeps
+    # session open, and timeout after sending an action reports unknown outcome and exits cleanly.
+    session = subprocess.Popen(
+        [python, str(PLUGIN / "src/transport.py")],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        session.stdin.write(json.dumps({"mode": "session", "config": settings}) + "\n")
+        session.stdin.flush()
+        ready = json.loads(session.stdout.readline())
+        assert ready == {"ok": True, "ready": True}, ready
+
+        session.stdin.write(json.dumps({"op": "actions"}) + "\n")
+        session.stdin.flush()
+        actions_reply = json.loads(session.stdout.readline())
+        assert actions_reply == {"ok": True, "data": ["show pipes", "help"]}, actions_reply
+
+        session.stdin.write(json.dumps({"op": "action", "line": "refuse"}) + "\n")
+        session.stdin.flush()
+        refuse_reply = json.loads(session.stdout.readline())
+        assert not refuse_reply["ok"] and not refuse_reply.get("fatal"), refuse_reply
+
+        # Session stays alive after an explicit DeviceError.
+        session.stdin.write(json.dumps({"op": "action", "line": "show pipes"}) + "\n")
+        session.stdin.flush()
+        ok_reply = json.loads(session.stdout.readline())
+        assert ok_reply == {"ok": True, "data": "Ran show pipes"}, ok_reply
+
+        # Dropping the reply to an in-flight action reports unknown outcome and closes cleanly.
+        session.stdin.write(json.dumps({"op": "action", "line": "disconnect"}) + "\n")
+        session.stdin.flush()
+        drop_reply = json.loads(session.stdout.readline())
+        assert (
+            not drop_reply["ok"]
+            and drop_reply.get("fatal") is True
+            and "Outcome unknown after sending action" in drop_reply["error"]
+        ), drop_reply
+        assert session.wait(10) == 0
+    finally:
+        if session.poll() is None:
+            session.kill()
+            session.wait()
 
 
 def device_rows():

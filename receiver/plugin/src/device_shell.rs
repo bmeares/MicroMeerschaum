@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Interactive and piped MicroMeerschaum device shell (`mrsm micro shell -i micro:<label>`).
-use crate::device::{error, exchange};
+use crate::device::{TRANSPORT, error, python};
 use meerschaum_plugin::prelude::*;
 use reedline::{
     Color as ReedlineColor, ColumnarMenu, Completer, CompletionResult, DefaultPrompt, Emacs,
@@ -10,18 +10,22 @@ use reedline::{
 };
 use std::{
     borrow::Cow,
+    collections::{BTreeSet, HashSet},
     env, fs,
-    io::{self, IsTerminal, Write},
+    io::{self, BufRead, BufReader, IsTerminal, Write},
     path::PathBuf,
+    process::{Child, ChildStdin, ChildStdout, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_MAX_HISTORY: usize = 1000;
 const TOOLBAR_BASE_SGR: &str = "0;38;5;16;7";
+const MAX_CATALOG: usize = 4096;
 
 #[derive(Debug, Clone)]
 struct ShellTheme {
@@ -998,9 +1002,649 @@ impl Hinter for DeviceToolbarHinter {
     }
 }
 
-struct DeviceCompletions {
+// --- Persistent transport session & completion cache ---
+
+const PIPE_ACTIONS: &[&str] = &[
+    "show pipes",
+    "show pipe",
+    "sync pipes",
+    "sync pipe",
+    "copy pipes",
+    "copy pipe",
+    "show data",
+    "show columns",
+    "show rowcounts",
+    "show progress",
+    "clear pipes",
+    "clear pipe",
+    "drop pipes",
+    "drop pipe",
+    "delete pipes",
+    "delete pipe",
+    "verify pipes",
+    "verify pipe",
+    "bootstrap pipes",
+    "bootstrap pipe",
+];
+
+const SELECTOR_FLAGS: &[&str] = &[
+    "-c",
+    "-m",
+    "-l",
+    "-i",
+    "--connector-keys",
+    "--metric-keys",
+    "--location-keys",
+    "--instance",
+    "--mrsm-instance",
+];
+
+const COPY_SELECTOR_FLAGS: &[&str] = &[
+    "-c",
+    "-m",
+    "-l",
+    "-i",
+    "-I",
+    "--connector-keys",
+    "--metric-keys",
+    "--location-keys",
+    "--instance",
+    "--mrsm-instance",
+    "--target-instance",
+];
+
+enum TransportError {
+    Device(String),
+    LinkLost(String),
+}
+
+struct TransportProcess {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl Drop for TransportProcess {
+    fn drop(&mut self) {
+        self.stdin.take();
+        for _ in 0..20 {
+            if matches!(self.child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl TransportProcess {
+    fn spawn(config: &Value) -> Result<Self> {
+        let mut child = python(config)
+            .args(["-P", "-c", TRANSPORT])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(error)?;
+        let stdin = child.stdin.take().expect("piped stdin");
+        let stdout = child.stdout.take().expect("piped stdout");
+        let mut proc = Self {
+            child,
+            stdin: Some(stdin),
+            stdout: BufReader::new(stdout),
+        };
+        let input = proc.stdin.as_mut().expect("active stdin");
+        serde_json::to_writer(&mut *input, &json!({"mode": "session", "config": config}))
+            .map_err(error)?;
+        writeln!(input).map_err(error)?;
+        input.flush().map_err(error)?;
+
+        let mut line = String::new();
+        let bytes = proc.stdout.read_line(&mut line).map_err(error)?;
+        if bytes == 0 {
+            return Err(error("Device transport closed before session was ready."));
+        }
+        let reply: Value = serde_json::from_str(&line).map_err(error)?;
+        if reply["ok"] != true {
+            return Err(error(
+                reply["error"]
+                    .as_str()
+                    .unwrap_or("Failed to open device transport session."),
+            ));
+        }
+        Ok(proc)
+    }
+
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    fn request(&mut self, request: &Value) -> std::result::Result<Value, TransportError> {
+        let non_replay = matches!(request["op"].as_str(), Some("action" | "write"));
+        let Some(input) = self.stdin.as_mut() else {
+            return Err(TransportError::LinkLost(
+                "Device transport is closed.".into(),
+            ));
+        };
+        if let Err(e) = serde_json::to_writer(&mut *input, request)
+            .and_then(|()| writeln!(input).map_err(serde_json::Error::io))
+            .and_then(|()| input.flush().map_err(serde_json::Error::io))
+        {
+            return Err(TransportError::LinkLost(format!(
+                "Device transport closed before sending request: {e}"
+            )));
+        }
+
+        let mut line = String::new();
+        match self.stdout.read_line(&mut line) {
+            Ok(0) | Err(_) => {
+                let msg = if non_replay {
+                    "Device transport closed without a result. Outcome unknown after sending action."
+                } else {
+                    "Device transport closed without a result."
+                };
+                return Err(TransportError::LinkLost(msg.into()));
+            }
+            Ok(_) => {}
+        }
+
+        let reply: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => {
+                let msg = if non_replay {
+                    "Invalid device transport result. Outcome unknown after sending action."
+                } else {
+                    "Invalid device transport result."
+                };
+                return Err(TransportError::LinkLost(msg.into()));
+            }
+        };
+
+        if reply["ok"] == true {
+            return Ok(reply["data"].clone());
+        }
+        let msg = reply["error"]
+            .as_str()
+            .unwrap_or("Invalid device transport result.")
+            .to_owned();
+        if reply["fatal"] == true {
+            Err(TransportError::LinkLost(msg))
+        } else {
+            Err(TransportError::Device(msg))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PipeCatalogEntry {
+    connector: String,
+    metric: String,
+    location: Option<String>,
+    instance: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SessionCache {
+    actions: Vec<String>,
+    catalog: Vec<PipeCatalogEntry>,
+    actions_loaded: bool,
+    catalog_loaded: bool,
+}
+
+impl SessionCache {
+    fn connectors(&self) -> Vec<String> {
+        self.catalog
+            .iter()
+            .map(|e| e.connector.as_str())
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn metrics(&self) -> Vec<String> {
+        self.catalog
+            .iter()
+            .map(|e| e.metric.as_str())
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn locations(&self) -> Vec<String> {
+        self.catalog
+            .iter()
+            .map(|e| e.location.as_deref().unwrap_or("None"))
+            .filter(|s| !s.chars().any(char::is_control))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn instances(&self) -> Vec<String> {
+        self.catalog
+            .iter()
+            .map(|e| e.instance.as_str())
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+}
+
+struct ShellSession {
     config: Value,
+    transport: Option<TransportProcess>,
     connected: Arc<AtomicBool>,
+    cache: SessionCache,
+}
+
+impl ShellSession {
+    fn new(config: Value, connected: Arc<AtomicBool>) -> Self {
+        Self {
+            config,
+            transport: None,
+            connected,
+            cache: SessionCache::default(),
+        }
+    }
+
+    fn is_connected(&mut self) -> bool {
+        if let Some(proc) = self.transport.as_mut() {
+            if proc.is_alive() {
+                return true;
+            }
+            self.disconnect();
+        }
+        false
+    }
+
+    fn disconnect(&mut self) {
+        self.transport = None;
+        self.connected.store(false, Ordering::Relaxed);
+    }
+
+    fn ensure_connected(&mut self) -> Result<bool> {
+        if self.is_connected() {
+            return Ok(false);
+        }
+        match TransportProcess::spawn(&self.config) {
+            Ok(proc) => {
+                self.transport = Some(proc);
+                self.connected.store(true, Ordering::Relaxed);
+                Ok(true)
+            }
+            Err(e) => {
+                self.connected.store(false, Ordering::Relaxed);
+                Err(e)
+            }
+        }
+    }
+
+    fn request_raw(&mut self, request: &Value) -> std::result::Result<Value, TransportError> {
+        let Some(proc) = self.transport.as_mut() else {
+            self.connected.store(false, Ordering::Relaxed);
+            return Err(TransportError::LinkLost(
+                "Device transport is not connected.".into(),
+            ));
+        };
+        let result = proc.request(request);
+        if matches!(result, Err(TransportError::LinkLost(_))) {
+            self.disconnect();
+        }
+        result
+    }
+
+    fn refresh_actions(&mut self) -> Result<()> {
+        let reply = match self.request_raw(&json!({"op": "actions"})) {
+            Ok(val) => Ok(val),
+            Err(TransportError::Device(_)) => {
+                self.request_raw(&json!({"op": "complete", "line": ""}))
+            }
+            Err(TransportError::LinkLost(msg)) => Err(TransportError::LinkLost(msg)),
+        };
+        match reply {
+            Ok(Value::Array(items)) => {
+                let mut seen = HashSet::new();
+                let mut actions = Vec::new();
+                for name in items.iter().filter_map(Value::as_str) {
+                    if !name.is_empty()
+                        && !name.chars().any(char::is_control)
+                        && seen.insert(name.to_owned())
+                    {
+                        actions.push(name.to_owned());
+                    }
+                }
+                self.cache.actions = actions;
+                self.cache.actions_loaded = true;
+                Ok(())
+            }
+            Ok(_) => Err(error("Invalid device actions result.")),
+            Err(TransportError::Device(msg)) | Err(TransportError::LinkLost(msg)) => {
+                Err(error(msg))
+            }
+        }
+    }
+
+    fn refresh_catalog(&mut self) -> Result<()> {
+        let mut entries = Vec::new();
+        let mut keys = HashSet::new();
+        let mut ids = HashSet::new();
+        loop {
+            let reply = match self.request_raw(&json!({
+                "op": "catalog",
+                "offset": entries.len(),
+                "limit": 16
+            })) {
+                Ok(val) => val,
+                Err(TransportError::Device(_)) => {
+                    // Catalog access is optional in action-only device sessions.
+                    self.cache.catalog.clear();
+                    self.cache.catalog_loaded = true;
+                    return Ok(());
+                }
+                Err(TransportError::LinkLost(msg)) => return Err(error(msg)),
+            };
+            let Some(items) = reply["items"].as_array() else {
+                self.cache.catalog_loaded = true;
+                return Ok(());
+            };
+            let more = reply["more"].as_bool().unwrap_or(false);
+            if items.len() > 16
+                || (more && items.is_empty())
+                || entries.len() + items.len() > MAX_CATALOG
+            {
+                self.cache.catalog_loaded = true;
+                return Ok(());
+            }
+            for item in items {
+                let id = item["id"].as_i64().unwrap_or(0);
+                let Some(key_arr) = item["key"].as_array() else {
+                    continue;
+                };
+                if key_arr.len() != 3 {
+                    continue;
+                }
+                let Some(connector) = key_arr[0].as_str().filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let Some(metric) = key_arr[1].as_str().filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let location = key_arr[2].as_str().map(str::to_owned);
+                let instance = item["instance"].as_str().unwrap_or("").to_owned();
+                let key = (connector.to_owned(), metric.to_owned(), location.clone());
+                if id <= 0 || !ids.insert(id) || !keys.insert(key) {
+                    continue;
+                }
+                entries.push(PipeCatalogEntry {
+                    connector: connector.to_owned(),
+                    metric: metric.to_owned(),
+                    location,
+                    instance,
+                });
+            }
+            if !more {
+                entries.retain(|entry| entry.connector != "mrsm");
+                self.cache.catalog = entries;
+                self.cache.catalog_loaded = true;
+                return Ok(());
+            }
+        }
+    }
+
+    fn refresh_cache(&mut self) -> Result<()> {
+        self.refresh_actions()?;
+        self.refresh_catalog()?;
+        Ok(())
+    }
+
+    fn connect_and_refresh(&mut self) -> Result<()> {
+        self.ensure_connected()?;
+        self.refresh_cache()
+    }
+
+    fn run_action(&mut self, action_line: &str, keep_cache_warm: bool) -> Result<Value> {
+        let reconnected = self.ensure_connected()?;
+        let result = match self.request_raw(&json!({"op": "action", "line": action_line})) {
+            Ok(data) => Ok(data),
+            Err(TransportError::Device(msg)) | Err(TransportError::LinkLost(msg)) => {
+                Err(error(msg))
+            }
+        };
+        if keep_cache_warm && self.is_connected() {
+            if reconnected {
+                let _ = self.refresh_cache();
+            } else if result.is_ok() && should_refresh_after_action(action_line) {
+                let _ = self.refresh_catalog();
+            }
+        }
+        result
+    }
+
+    fn complete_actions(&mut self, prefix: &str, load_catalog: bool) -> Result<Vec<String>> {
+        let reconnected = self.ensure_connected()?;
+        if reconnected || !self.cache.actions_loaded {
+            self.refresh_actions()?;
+            if load_catalog && (reconnected || !self.cache.catalog_loaded) {
+                let _ = self.refresh_catalog();
+            }
+        }
+        let norm = normalized_action_prefix(prefix);
+        Ok(self
+            .cache
+            .actions
+            .iter()
+            .filter(|name| name.starts_with(&norm))
+            .cloned()
+            .collect())
+    }
+}
+
+fn should_refresh_after_action(action_line: &str) -> bool {
+    let first = action_line.split_whitespace().next().unwrap_or("");
+    matches!(
+        first,
+        "sync" | "copy" | "drop" | "delete" | "register" | "expose" | "unexpose" | "bootstrap"
+    )
+}
+
+fn normalized_action_prefix(line: &str) -> String {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let mut prefix = words.join(" ");
+    if !words.is_empty() && line.chars().last().is_some_and(char::is_whitespace) {
+        prefix.push(' ');
+    }
+    prefix
+}
+
+struct Token<'a> {
+    start: usize,
+    text: &'a str,
+}
+
+fn tokenize_spans(s: &str) -> Vec<Token<'_>> {
+    let mut tokens = Vec::new();
+    let mut in_word = false;
+    let mut start = 0;
+    for (idx, ch) in s.char_indices() {
+        if ch.is_whitespace() {
+            if in_word {
+                tokens.push(Token {
+                    start,
+                    text: &s[start..idx],
+                });
+                in_word = false;
+            }
+        } else if !in_word {
+            start = idx;
+            in_word = true;
+        }
+    }
+    if in_word {
+        tokens.push(Token {
+            start,
+            text: &s[start..],
+        });
+    }
+    tokens
+}
+
+fn suggestion(value: impl Into<String>, span: Span) -> Suggestion {
+    Suggestion {
+        value: value.into(),
+        span,
+        append_whitespace: false,
+        ..Default::default()
+    }
+}
+
+fn filter_values(values: Vec<String>, current_word: &str, span: Span) -> Vec<Suggestion> {
+    if let Some(neg) = current_word.strip_prefix('_') {
+        return values
+            .into_iter()
+            .filter(|v| v.starts_with(neg))
+            .map(|v| suggestion(format!("_{v}"), span))
+            .collect();
+    }
+    values
+        .into_iter()
+        .filter(|v| v.starts_with(current_word))
+        .map(|v| suggestion(v, span))
+        .collect()
+}
+
+fn complete_with_cache(prefix: &str, cache: &SessionCache) -> Vec<Suggestion> {
+    let pos = prefix.len();
+    let all_tokens = tokenize_spans(prefix);
+    let trailing_space = prefix.chars().last().is_some_and(char::is_whitespace);
+
+    let (effective_start, tokens) = if let Some(first) = all_tokens.first()
+        && first.text == "mrsm"
+        && (all_tokens.len() > 1 || trailing_space)
+    {
+        let next_start = all_tokens.get(1).map(|t| t.start).unwrap_or(pos);
+        (next_start, &all_tokens[1..])
+    } else {
+        let start = all_tokens.first().map(|t| t.start).unwrap_or(0);
+        (start, all_tokens.as_slice())
+    };
+
+    let mut normalized = tokens.iter().map(|t| t.text).collect::<Vec<_>>().join(" ");
+    if !tokens.is_empty() && trailing_space {
+        normalized.push(' ');
+    }
+
+    let action_matches: Vec<&str> = cache
+        .actions
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !name.chars().any(char::is_control) && name.starts_with(&normalized))
+        .collect();
+
+    if !action_matches.is_empty() {
+        return action_matches
+            .into_iter()
+            .map(|name| suggestion(name, Span::new(effective_start, pos)))
+            .collect();
+    }
+
+    // Complete permitted action names after `help `.
+    if let Some(first) = tokens.first()
+        && first.text == "help"
+        && (tokens.len() > 1 || trailing_space)
+    {
+        let help_args = &tokens[1..];
+        let arg_start = help_args.first().map(|t| t.start).unwrap_or(pos);
+        let mut arg_norm = help_args
+            .iter()
+            .map(|t| t.text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !help_args.is_empty() && trailing_space {
+            arg_norm.push(' ');
+        }
+        return cache
+            .actions
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !name.chars().any(char::is_control) && name.starts_with(&arg_norm))
+            .map(|name| suggestion(name, Span::new(arg_start, pos)))
+            .collect();
+    }
+
+    // Match the longest pipe action followed by whitespace.
+    let mut matched_pipe_action: Option<(&str, usize)> = None;
+    for &candidate in PIPE_ACTIONS {
+        let words: Vec<&str> = candidate.split_whitespace().collect();
+        let n = words.len();
+        let has_boundary = tokens.len() > n || (tokens.len() == n && trailing_space);
+        if has_boundary
+            && tokens[..n].iter().map(|t| t.text).eq(words.iter().copied())
+            && matched_pipe_action.is_none_or(|(_, best_n)| n > best_n)
+        {
+            matched_pipe_action = Some((candidate, n));
+        }
+    }
+
+    let Some((pipe_action, action_words)) = matched_pipe_action else {
+        return Vec::new();
+    };
+
+    let is_copy = matches!(pipe_action, "copy pipes" | "copy pipe");
+    let args = &tokens[action_words..];
+    let (preceding, current_word, word_span) = if trailing_space || args.is_empty() {
+        (args, "", Span::new(pos, pos))
+    } else {
+        let last = args.last().unwrap();
+        (
+            &args[..args.len() - 1],
+            last.text,
+            Span::new(last.start, pos),
+        )
+    };
+
+    let flags = if is_copy {
+        COPY_SELECTOR_FLAGS
+    } else {
+        SELECTOR_FLAGS
+    };
+
+    if current_word.starts_with('-') {
+        return flags
+            .iter()
+            .copied()
+            .filter(|flag| flag.starts_with(current_word))
+            .map(|flag| suggestion(flag, word_span))
+            .collect();
+    }
+
+    match preceding.last().map(|t| t.text) {
+        Some("-c" | "--connector-keys") => {
+            filter_values(cache.connectors(), current_word, word_span)
+        }
+        Some("-m" | "--metric-keys") => filter_values(cache.metrics(), current_word, word_span),
+        Some("-l" | "--location-keys") => filter_values(cache.locations(), current_word, word_span),
+        Some("-i" | "--instance" | "--mrsm-instance") => {
+            filter_values(cache.instances(), current_word, word_span)
+        }
+        Some("-I" | "--target-instance") if is_copy => Vec::new(),
+        _ => flags
+            .iter()
+            .copied()
+            .filter(|flag| flag.starts_with(current_word))
+            .map(|flag| suggestion(flag, word_span))
+            .collect(),
+    }
+}
+
+struct DeviceCompletions {
+    session: Arc<Mutex<ShellSession>>,
 }
 
 impl Completer for DeviceCompletions {
@@ -1008,47 +1652,16 @@ impl Completer for DeviceCompletions {
         let Some(prefix) = line.get(..pos) else {
             return CompletionResult::fresh(Vec::new());
         };
-        let Ok(Value::Array(items)) =
-            exchange(&self.config, json!({"op":"complete", "line":prefix}))
-        else {
-            self.connected.store(false, Ordering::Relaxed);
-            return CompletionResult::fresh(Vec::new());
+        let cache = match self.session.lock() {
+            Ok(mut session) => {
+                if session.is_connected() && !session.cache.actions_loaded {
+                    let _ = session.refresh_cache();
+                }
+                session.cache.clone()
+            }
+            Err(_) => return CompletionResult::fresh(Vec::new()),
         };
-        self.connected.store(true, Ordering::Relaxed);
-        let suggestions = items
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|name| !name.chars().any(char::is_control))
-            .map(|name| Suggestion {
-                value: name.to_owned(),
-                span: Span::new(0, pos),
-                append_whitespace: false,
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
-        CompletionResult::fresh(suggestions)
-    }
-}
-
-fn query_completions(config: &Value, prefix: &str, connected: &AtomicBool) -> Result<Vec<String>> {
-    match exchange(config, json!({"op":"complete", "line":prefix})) {
-        Ok(Value::Array(items)) => {
-            connected.store(true, Ordering::Relaxed);
-            Ok(items
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|name| !name.chars().any(char::is_control))
-                .map(str::to_owned)
-                .collect())
-        }
-        Ok(_) => {
-            connected.store(true, Ordering::Relaxed);
-            Err(error("Invalid device completion result."))
-        }
-        Err(e) => {
-            connected.store(false, Ordering::Relaxed);
-            Err(e)
-        }
+        CompletionResult::fresh(complete_with_cache(prefix, &cache))
     }
 }
 
@@ -1062,9 +1675,16 @@ pub(crate) fn run(config: &Value, instance: &str) -> Result<()> {
     let compose = compose_project_name(env_non_empty("MRSM__COMPOSE_CONFIG").as_deref());
     let transport = transport_label(config);
     let connected = Arc::new(AtomicBool::new(false));
+    let session = Arc::new(Mutex::new(ShellSession::new(
+        config.clone(),
+        connected.clone(),
+    )));
 
     if interactive {
         println!("{}", render_banner(&theme, VERSION));
+        if let Ok(mut guard) = session.lock() {
+            let _ = guard.connect_and_refresh();
+        }
     }
 
     let mut editor = if interactive {
@@ -1084,8 +1704,7 @@ pub(crate) fn run(config: &Value, instance: &str) -> Result<()> {
                 .with_history(Box::new(history))
                 .with_edit_mode(Box::new(Emacs::new(keys)))
                 .with_completer(Box::new(DeviceCompletions {
-                    config: config.clone(),
-                    connected: connected.clone(),
+                    session: session.clone(),
                 }))
                 .with_hinter(Box::new(DeviceToolbarHinter {
                     theme: theme.clone(),
@@ -1136,45 +1755,53 @@ pub(crate) fn run(config: &Value, instance: &str) -> Result<()> {
                     let _ = out.flush();
                 }
             }
-            ShellAction::Complete(prefix) => match query_completions(config, &prefix, &connected) {
-                Ok(matches) => {
-                    if matches.is_empty() {
-                        if interactive {
-                            let msg = if prefix.is_empty() {
-                                "No matching actions.".to_owned()
-                            } else {
-                                format!("No matching actions for '{prefix}'.")
-                            };
-                            eprintln!("{}", format_result(&theme, true, false, &msg));
-                        }
-                    } else if interactive {
-                        for name in matches {
-                            println!(
-                                "  {}",
-                                apply_style(&name, &theme.instance_style, theme.ansi)
-                            );
-                        }
-                    } else {
-                        for name in matches {
-                            println!("{name}");
+            ShellAction::Complete(prefix) => {
+                let result = session
+                    .lock()
+                    .map_err(|_| error("Device session interrupted."))
+                    .and_then(|mut s| s.complete_actions(&prefix, interactive));
+                match result {
+                    Ok(matches) => {
+                        if matches.is_empty() {
+                            if interactive {
+                                let msg = if prefix.is_empty() {
+                                    "No matching actions.".to_owned()
+                                } else {
+                                    format!("No matching actions for '{prefix}'.")
+                                };
+                                eprintln!("{}", format_result(&theme, true, false, &msg));
+                            }
+                        } else if interactive {
+                            for name in matches {
+                                println!(
+                                    "  {}",
+                                    apply_style(&name, &theme.instance_style, theme.ansi)
+                                );
+                            }
+                        } else {
+                            for name in matches {
+                                println!("{name}");
+                            }
                         }
                     }
+                    Err(e) => {
+                        eprintln!(
+                            "{}",
+                            format_result(&theme, interactive, false, &e.to_string())
+                        );
+                    }
                 }
-                Err(e) => {
-                    eprintln!(
-                        "{}",
-                        format_result(&theme, interactive, false, &e.to_string())
-                    );
-                }
-            },
+            }
             ShellAction::DeviceAction(action_line) => {
-                match exchange(config, json!({"op":"action","line":action_line})) {
+                let result = session
+                    .lock()
+                    .map_err(|_| error("Device session interrupted."))
+                    .and_then(|mut s| s.run_action(&action_line, interactive));
+                match result {
                     Ok(Value::String(msg)) => {
-                        connected.store(true, Ordering::Relaxed);
                         println!("{}", format_result(&theme, interactive, true, &msg));
                     }
                     Ok(_) => {
-                        connected.store(true, Ordering::Relaxed);
                         eprintln!(
                             "{}",
                             format_result(
@@ -1186,21 +1813,19 @@ pub(crate) fn run(config: &Value, instance: &str) -> Result<()> {
                         );
                     }
                     Err(e) => {
-                        let msg = e.to_string();
-                        if msg.contains("Timed out")
-                            || msg.contains("could not open")
-                            || msg.contains("transport closed")
-                            || msg.contains("unavailable")
-                        {
-                            connected.store(false, Ordering::Relaxed);
-                        }
-                        eprintln!("{}", format_result(&theme, interactive, false, &msg));
+                        eprintln!(
+                            "{}",
+                            format_result(&theme, interactive, false, &e.to_string())
+                        );
                     }
                 }
             }
         }
     }
 
+    if let Ok(mut guard) = session.lock() {
+        guard.disconnect();
+    }
     if let Some(editor) = editor.as_mut() {
         let _ = editor.sync_history();
     }
@@ -1484,5 +2109,221 @@ mod tests {
             .unwrap();
         let cmds: Vec<&str> = items.iter().map(|i| i.command_line.as_str()).collect();
         assert_eq!(cmds, vec!["second", "third"]);
+    }
+
+    fn sample_cache() -> SessionCache {
+        SessionCache {
+            actions: vec![
+                "copy pipes".into(),
+                "help".into(),
+                "show actions".into(),
+                "show pipes".into(),
+                "sync pipes".into(),
+                "blink".into(),
+            ],
+            catalog: vec![
+                PipeCatalogEntry {
+                    connector: "sensor".into(),
+                    metric: "readings".into(),
+                    location: None,
+                    instance: "journal:local".into(),
+                },
+                PipeCatalogEntry {
+                    connector: "sensor".into(),
+                    metric: "readonly".into(),
+                    location: Some("outside".into()),
+                    instance: "journal:local".into(),
+                },
+                PipeCatalogEntry {
+                    connector: "plugin:bme".into(),
+                    metric: "other".into(),
+                    location: None,
+                    instance: "sql:local".into(),
+                },
+            ],
+            actions_loaded: true,
+            catalog_loaded: true,
+        }
+    }
+
+    fn vals(suggestions: &[Suggestion]) -> Vec<&str> {
+        suggestions.iter().map(|s| s.value.as_str()).collect()
+    }
+
+    #[test]
+    fn completion_suggests_actions_multiword_and_mrsm_prefix() {
+        let cache = sample_cache();
+
+        let all = complete_with_cache("", &cache);
+        assert_eq!(
+            vals(&all),
+            vec![
+                "copy pipes",
+                "help",
+                "show actions",
+                "show pipes",
+                "sync pipes",
+                "blink"
+            ]
+        );
+        assert!(all.iter().all(|s| s.span == Span::new(0, 0)));
+
+        let sh = complete_with_cache("sh", &cache);
+        assert_eq!(vals(&sh), vec!["show actions", "show pipes"]);
+        assert!(sh.iter().all(|s| s.span == Span::new(0, 2)));
+
+        let show_space = complete_with_cache("show ", &cache);
+        assert_eq!(vals(&show_space), vec!["show actions", "show pipes"]);
+        assert!(show_space.iter().all(|s| s.span == Span::new(0, 5)));
+
+        let show_p = complete_with_cache("show p", &cache);
+        assert_eq!(vals(&show_p), vec!["show pipes"]);
+        assert_eq!(show_p[0].span, Span::new(0, 6));
+
+        let mrsm_sh = complete_with_cache("mrsm sh", &cache);
+        assert_eq!(vals(&mrsm_sh), vec!["show actions", "show pipes"]);
+        assert!(mrsm_sh.iter().all(|s| s.span == Span::new(5, 7)));
+
+        let help_sh = complete_with_cache("help sh", &cache);
+        assert_eq!(vals(&help_sh), vec!["show actions", "show pipes"]);
+        assert!(help_sh.iter().all(|s| s.span == Span::new(5, 7)));
+    }
+
+    #[test]
+    fn completion_suggests_selector_flags_for_pipe_actions() {
+        let cache = sample_cache();
+
+        let after_show = complete_with_cache("show pipes ", &cache);
+        assert_eq!(vals(&after_show), SELECTOR_FLAGS);
+        assert!(after_show.iter().all(|s| s.span == Span::new(11, 11)));
+
+        let dash = complete_with_cache("show pipes -", &cache);
+        assert_eq!(vals(&dash), SELECTOR_FLAGS);
+        assert!(dash.iter().all(|s| s.span == Span::new(11, 12)));
+
+        let long_m = complete_with_cache("show pipes --m", &cache);
+        assert_eq!(vals(&long_m), vec!["--metric-keys", "--mrsm-instance"]);
+        assert!(long_m.iter().all(|s| s.span == Span::new(11, 14)));
+
+        // Singular alias and other pipe actions also complete selector flags.
+        assert_eq!(
+            vals(&complete_with_cache("show pipe ", &cache)),
+            SELECTOR_FLAGS
+        );
+        assert_eq!(
+            vals(&complete_with_cache("sync pipes -", &cache)),
+            SELECTOR_FLAGS
+        );
+        assert_eq!(
+            vals(&complete_with_cache("show data ", &cache)),
+            SELECTOR_FLAGS
+        );
+        assert_eq!(
+            vals(&complete_with_cache("show columns ", &cache)),
+            SELECTOR_FLAGS
+        );
+        assert_eq!(
+            vals(&complete_with_cache("show rowcounts ", &cache)),
+            SELECTOR_FLAGS
+        );
+        assert_eq!(
+            vals(&complete_with_cache("show progress ", &cache)),
+            SELECTOR_FLAGS
+        );
+
+        // copy pipes / copy pipe include -I and --target-instance.
+        let copy_flags = complete_with_cache("copy pipes ", &cache);
+        assert_eq!(vals(&copy_flags), COPY_SELECTOR_FLAGS);
+        assert!(vals(&copy_flags).contains(&"-I"));
+        assert!(vals(&copy_flags).contains(&"--target-instance"));
+        assert_eq!(
+            vals(&complete_with_cache("copy pipe --t", &cache)),
+            vec!["--target-instance"]
+        );
+
+        // After a value, empty token or `-` suggests flags with span at the end only.
+        let after_val = complete_with_cache("show pipes -m readings ", &cache);
+        assert_eq!(vals(&after_val), SELECTOR_FLAGS);
+        assert!(after_val.iter().all(|s| s.span == Span::new(23, 23)));
+
+        let after_val_dash = complete_with_cache("show pipes -m readings -", &cache);
+        assert_eq!(vals(&after_val_dash), SELECTOR_FLAGS);
+        assert!(after_val_dash.iter().all(|s| s.span == Span::new(23, 24)));
+
+        // Non-pipe actions do not suggest pipe selector flags.
+        assert!(complete_with_cache("blink ", &cache).is_empty());
+        assert!(complete_with_cache("blink -", &cache).is_empty());
+    }
+
+    #[test]
+    fn completion_suggests_catalog_keys_and_replaces_only_current_word() {
+        let cache = sample_cache();
+
+        let conn_all = complete_with_cache("show pipes -c ", &cache);
+        assert_eq!(vals(&conn_all), vec!["plugin:bme", "sensor"]);
+        assert!(conn_all.iter().all(|s| s.span == Span::new(14, 14)));
+
+        let conn_long = complete_with_cache("show pipes --connector-keys s", &cache);
+        assert_eq!(vals(&conn_long), vec!["sensor"]);
+        assert_eq!(conn_long[0].span, Span::new(28, 29));
+
+        let metric_all = complete_with_cache("show pipes -m ", &cache);
+        assert_eq!(vals(&metric_all), vec!["other", "readings", "readonly"]);
+        assert!(metric_all.iter().all(|s| s.span == Span::new(14, 14)));
+
+        let metric_partial = complete_with_cache("show pipes -m rea", &cache);
+        assert_eq!(vals(&metric_partial), vec!["readings", "readonly"]);
+        assert!(metric_partial.iter().all(|s| s.span == Span::new(14, 17)));
+
+        let metric_neg = complete_with_cache("show pipes -m _r", &cache);
+        assert_eq!(vals(&metric_neg), vec!["_readings", "_readonly"]);
+        assert!(metric_neg.iter().all(|s| s.span == Span::new(14, 16)));
+
+        let loc_all = complete_with_cache("show pipes -m readings -l ", &cache);
+        assert_eq!(vals(&loc_all), vec!["None", "outside"]);
+        assert!(loc_all.iter().all(|s| s.span == Span::new(26, 26)));
+
+        let loc_none = complete_with_cache("show pipes --location-keys N", &cache);
+        assert_eq!(vals(&loc_none), vec!["None"]);
+        assert_eq!(loc_none[0].span, Span::new(27, 28));
+
+        let loc_out = complete_with_cache("show pipes -m readings -l o", &cache);
+        assert_eq!(vals(&loc_out), vec!["outside"]);
+        assert_eq!(loc_out[0].span, Span::new(26, 27));
+
+        let inst_all = complete_with_cache("show pipes -i ", &cache);
+        assert_eq!(vals(&inst_all), vec!["journal:local", "sql:local"]);
+        assert!(inst_all.iter().all(|s| s.span == Span::new(14, 14)));
+
+        let inst_long = complete_with_cache("show pipes --mrsm-instance s", &cache);
+        assert_eq!(vals(&inst_long), vec!["sql:local"]);
+        assert_eq!(inst_long[0].span, Span::new(27, 28));
+
+        let with_mrsm = complete_with_cache("mrsm show pipes -m readi", &cache);
+        assert_eq!(vals(&with_mrsm), vec!["readings"]);
+        assert_eq!(with_mrsm[0].span, Span::new(19, 24));
+
+        // -I / --target-instance does not suggest local catalog instances.
+        assert!(complete_with_cache("copy pipes -I ", &cache).is_empty());
+    }
+
+    #[test]
+    fn completion_handles_empty_or_unavailable_catalog_gracefully() {
+        let cache = SessionCache {
+            actions: vec!["show pipes".into(), "help".into()],
+            catalog: Vec::new(),
+            actions_loaded: true,
+            catalog_loaded: true,
+        };
+
+        assert_eq!(vals(&complete_with_cache("sh", &cache)), vec!["show pipes"]);
+        assert_eq!(
+            vals(&complete_with_cache("show pipes -", &cache)),
+            SELECTOR_FLAGS
+        );
+        assert!(complete_with_cache("show pipes -c ", &cache).is_empty());
+        assert!(complete_with_cache("show pipes -m ", &cache).is_empty());
+        assert!(complete_with_cache("show pipes -l ", &cache).is_empty());
+        assert!(complete_with_cache("show pipes -i ", &cache).is_empty());
     }
 }

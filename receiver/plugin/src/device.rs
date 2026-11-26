@@ -12,7 +12,7 @@ use std::{
     sync::Mutex,
 };
 
-const TRANSPORT: &str = concat!(
+pub(super) const TRANSPORT: &str = concat!(
     include_str!("write_guard.py"),
     "\n",
     include_str!("transport.py")
@@ -36,7 +36,7 @@ pub(super) fn error(reason: impl ToString) -> Error {
     Error::Message(reason.to_string())
 }
 
-fn python(config: &Value) -> Command {
+pub(super) fn python(config: &Value) -> Command {
     let executable = config["python"]
         .as_str()
         .map(str::to_owned)
