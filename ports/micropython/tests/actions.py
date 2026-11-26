@@ -61,14 +61,31 @@ assert registry.dispatch("field wrong\nfield wrong")[0] is False
 assert not registry.dispatch('field "unfinished')[0]
 assert registry.dispatch("field private", ("field",))[0] is False
 assert len(calls) == 1
-assert registry.dispatch("help", ("help", "field")) == (True, "field\nhelp")
+assert registry.dispatch("help", ("help", "field")) == (True, "field\nhelp  help [ACTION]")
 assert registry.complete("show ") == ["show actions", "show pipes"]
-assert registry.dispatch("sync pipes")[0] and source.get_docs() == [{"value": 41}]
+ok, msg = registry.dispatch("sync pipes")
+assert ok and msg == "+ Pipe('plugin:test_source', 'room', 'north')  committed 1 input row"
+assert source.get_docs() == [{"value": 41}]
 assert p.get_docs() == []
 ok, msg = registry.dispatch("sync pipes -m room")
 assert not ok and "push-only" in msg and len(source.get_docs()) == 1
 ok, msg = registry.dispatch("show pipes -c sensor -m room -l None -i journal:local")
-assert ok and "sensor room" in msg and "plugin:" not in msg
+assert ok and msg == "Pipe('sensor', 'room')" and "plugin:" not in msg
+ok, msg = registry.dispatch("show pipe -l [None]")
+assert ok and msg == "Pipe('sensor', 'room')"
+ok, msg = registry.dispatch("show pipes -l _[None]")
+assert ok and msg == "Pipe('plugin:test_source', 'room', 'north')"
+ok, msg = registry.dispatch("show pipes -l _None")
+assert ok and msg == "Pipe('plugin:test_source', 'room', 'north')"
+ok, msg = registry.dispatch("show pipes -c _sensor")
+assert ok and msg == "Pipe('plugin:test_source', 'room', 'north')"
+ok, msg = registry.dispatch("show pipes -c sensor plugin:test_source _sensor")
+assert ok and msg == "Pipe('plugin:test_source', 'room', 'north')"
+ok, msg = registry.dispatch("show pipes -c sensor -c plugin:test_source")
+assert ok and msg == "Pipe('sensor', 'room')\nPipe('plugin:test_source', 'room', 'north')"
+ok, msg = registry.dispatch("sync pipe -c _sensor")
+assert ok and msg == "+ Pipe('plugin:test_source', 'room', 'north')  committed 1 input row"
+assert len(source.get_docs()) == 2
 sink = provision("sensor", "room", root + "/actions-sink.mm", 1, 21, 2,
                  receiver=True, instance="journal:sink", create=True)
 provision_peer("peer:archive", 2, lambda batch: sink.receive(1, batch))
@@ -102,12 +119,25 @@ assert call("catalog", limit=1)["data"] == {
                "filters": []}], "more": True}
 assert call("catalog", offset=1)["data"]["items"][0]["id"] == second_id
 assert not call("catalog", limit=65)["ok"]
-assert call("action", line="help")["data"] == "field\nfield fail\nhelp\nsync pipes"
+assert call("action", line="help")["data"] == (
+    "field\n"
+    "field fail\n"
+    "help  help [ACTION]\n"
+    "sync pipes (sync pipe)  Fetch and commit rows from matching source Pipes."
+)
+assert call("action", line="help sync pipe")["data"] == (
+    "sync pipes (sync pipe)  Fetch and commit rows from matching source Pipes."
+)
+assert not call("action", line="help field private")["ok"]
+assert not call("action", line="help show pipes")["ok"]
+assert not call("action", line="help show pipe")["ok"]
 assert not call("action", line="field private")["ok"]
 assert not call("action", line="field fail")["ok"]
 assert not call("action", line="sync pipes -l north")["ok"]
+assert not call("action", line="sync pipe -l north")["ok"]
 assert call("complete", line="fi")["data"] == ["field", "field fail"]
 assert "field private" not in call("actions")["data"]
+assert "sync pipe" not in call("actions")["data"]
 row = {"tick": 9, "t": {"$us": -9}, "flag": True, "label": "north"}
 assert call("write", key=key, rows=[row])["ok"]
 assert p.progress()["high"] == 1 and p.progress()["confirmed"] == 0
@@ -137,8 +167,23 @@ framer.feed(b"\n", lambda data: received.append(session.handle(data)))
 assert p.progress()["high"] == 2 and len(received) == 2
 # A lost response does not trigger a device-side retry.
 assert call("read", key=key, limit=3)["data"] == [row, {"x": 1}]
-assert registry.dispatch("copy pipes -m room -c sensor peer:archive")[0]
+ok, msg = registry.dispatch("copy pipes -m room -c sensor peer:archive")
+assert ok and msg.startswith("+ Pipe('sensor', 'room')  "), msg
 assert sink.get_docs()[1] == {"x": 1}
+ok, msg = registry.dispatch("copy pipe -I peer:archive -c sensor -m room")
+assert ok and msg.startswith("+ Pipe('sensor', 'room')  "), msg
+ok, msg = registry.dispatch("copy pipes --target-instance peer:archive -c sensor -l [None]")
+assert ok and msg.startswith("+ Pipe('sensor', 'room')  "), msg
+for bad_copy in (
+    "copy pipes peer:archive -I peer:archive",
+    "copy pipes -I peer:archive peer:archive",
+    "copy pipes -I peer:archive --target-instance peer:archive",
+    "copy pipes -I",
+    "copy pipes -I notpeer",
+    "show pipes -I peer:archive",
+    "sync pipes -I peer:archive",
+):
+    assert not registry.dispatch(bad_copy)[0], bad_copy
 p.reclaim()
 assert p.get_docs() == []
 assert p.sync({"text": ["x" * 1400] * 3})[0]
@@ -228,16 +273,87 @@ assert bare_registry.help_for("sensor reset") == "Reset sensor state."
 assert bare_registry.help_for("doc probe") == "Inspect diagnostic probe."
 assert bare_registry.help_for("unknown") is None
 
-# Existing help output format stays unchanged (action names only).
+# Help and show actions include descriptions and aliases, and respect remote gating.
 ok, help_out = bare_registry.dispatch("help")
-assert ok and "device label" in help_out and "Report board status." not in help_out, help_out
+assert ok and "device label" in help_out and "board status  Report board status." in help_out, help_out
+assert "show actions (show action)  List available actions." in help_out, help_out
+assert "show pipes (show pipe)  List matching configured Pipes." in help_out, help_out
+assert bare_registry.dispatch("show actions") == (True, help_out)
+assert bare_registry.dispatch("show action") == (True, help_out)
+assert not bare_registry.dispatch("show actions extra")[0]
+assert bare_registry.dispatch("help board status") == (True, "board status  Report board status.")
+assert bare_registry.dispatch("help show pipe") == (
+    True, "show pipes (show pipe)  List matching configured Pipes."
+)
+ok, prefix_out = bare_registry.dispatch("help show")
+assert ok and "show actions (show action)" in prefix_out and "show pipes (show pipe)" in prefix_out
+assert bare_registry.dispatch("help missing") == (False, "unknown action")
+assert bare_registry.help_for("show pipes") == "List matching configured Pipes."
+assert bare_registry.help_for("show pipe") == "List matching configured Pipes."
 
-# Reject invalid/duplicate bare and explicit registrations.
+# Custom action aliases (explicit name and bare function) and remote dispatch via alias.
+@bare_registry.make_action("node check", help="Check node.", alias="ping")
+def node_check(args):
+    return True, "pong:" + ",".join(args)
+
+
+@bare_registry.make_action(alias="stat", help="Report quick status.")
+def quick_status(args):
+    return True, "green"
+
+
+assert bare_registry.dispatch("ping one two") == (True, "pong:one,two")
+assert bare_registry.dispatch("stat") == (True, "green")
+assert bare_registry.dispatch("help ping") == (True, "node check (ping)  Check node.")
+assert bare_registry.dispatch("help stat") == (True, "quick status (stat)  Report quick status.")
+assert bare_registry.dispatch("ping a", ("node check",)) == (True, "pong:a")
+assert not bare_registry.dispatch("ping a", ("help",))[0]
+assert bare_registry.dispatch("help ping", ("help",)) == (False, "unknown action")
+assert bare_registry.names(("node check", "show pipes")) == ["node check", "show pipes"]
+
+# Non-default instance Pipe(...) formatting and multi-pipe partial failure markers.
+multi_reg = ActionRegistry()
+good_src = provision("plugin:test_source", "temp", root + "/multi-good.mm", 1, 31, 2,
+                     instance="journal:alt", create=True)
+bad_src = provision("plugin:test_source", "fail", root + "/multi-bad.mm", 1, 32, 2,
+                    location="west", instance="journal:alt", create=True)
+multi_reg.expose(good_src, read=True, write=True)
+multi_reg.expose(bad_src, read=True, write=True)
+ok, shown = multi_reg.dispatch("show pipes -i journal:alt")
+assert ok and shown == (
+    "Pipe('plugin:test_source', 'temp', instance='journal:alt')\n"
+    "Pipe('plugin:test_source', 'fail', 'west', instance='journal:alt')"
+), shown
+
+
+def flaky_fetch(pipe):
+    if pipe.metric_key == "fail":
+        raise RuntimeError("sensor offline")
+    return {"v": 7}
+
+
+test_source.fetch = flaky_fetch
+ok, sync_out = multi_reg.dispatch("sync pipes -m temp fail")
+assert not ok, sync_out
+assert sync_out == (
+    "+ Pipe('plugin:test_source', 'temp', instance='journal:alt')  committed 1 input row\n"
+    "- Pipe('plugin:test_source', 'fail', 'west', instance='journal:alt')  sensor offline (confirmed 0 input rows)"
+), sync_out
+good_src.close()
+bad_src.close()
+
+# Reject invalid/duplicate bare, explicit, and alias registrations.
 for bad in (
     lambda: bare_registry.make_action(lambda args: (True, "x")),
     lambda: bare_registry.make_action(device_label),
     lambda: bare_registry.make_action("bad  name"),
     lambda: bare_registry.make_action("valid name", help=123),
+    lambda: bare_registry.make_action("valid name", alias="bad  alias"),
+    lambda: bare_registry.make_action("same", alias="same"),
+    lambda: bare_registry.make_action("other", alias="ping"),
+    lambda: bare_registry.make_action("ping"),
+    lambda: bare_registry.make_action("other", alias="show pipe"),
+    lambda: bare_registry.make_action("show pipe"),
 ):
     try:
         bad()

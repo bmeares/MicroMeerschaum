@@ -50,19 +50,18 @@ static bool show_actions(const mm_action_call *, mm_action_output *, void *);
 bool mm_actions_init_with_help(mm_actions *r, const mm_action **slots, size_t capacity,
                                const mm_action *help_action)
 {
-    static const mm_action list_action = {"show actions", NULL, "List available actions.",
+    static const mm_action list_action = {"show actions", "show action", "List available actions.",
                                          show_actions, NULL};
     if (!r) return false;
     *r = (mm_actions){0};
     if (!slots || capacity < 2 || !help_action || !help_action->name ||
-        strcmp(help_action->name, "help") != 0 ||
-        (help_action->alias && strcmp(help_action->alias, list_action.name) == 0)) return false;
+        strcmp(help_action->name, "help") != 0) return false;
     *r = (mm_actions){slots, 0, capacity};
-    if (!mm_actions_register(r, help_action)) {
+    if (!mm_actions_register(r, help_action) || !mm_actions_register(r, &list_action)) {
+        while (r->count) r->slots[--r->count] = NULL;
         *r = (mm_actions){0};
         return false;
     }
-    slots[r->count++] = &list_action;
     return true;
 }
 

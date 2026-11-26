@@ -10,6 +10,10 @@
 extern "C" {
 #endif
 
+#ifndef MM_PIPE_ACTION_MAX_VALUES
+#define MM_PIPE_ACTION_MAX_VALUES 8u
+#endif
+
 /* An explicitly published, already-open handle. The action reads connector,
  * metric and location from the handle's provisioned stream key. */
 typedef struct {

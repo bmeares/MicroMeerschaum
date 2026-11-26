@@ -92,11 +92,19 @@ static void registration(void)
     CHECK(!mm_actions_register(&small, &general));
     mm_action custom = {"help", "?", NULL, capture, "legacy"};
     CHECK(!mm_actions_init_with_help(&small, pair, 2, &general));
+    mm_action collide_name = {"help", "show actions", NULL, capture, "bad"};
+    CHECK(!mm_actions_init_with_help(&small, pair, 2, &collide_name));
+    mm_action collide_alias = {"help", "show action", NULL, capture, "bad"};
+    CHECK(!mm_actions_init_with_help(&small, pair, 2, &collide_alias));
     CHECK(mm_actions_init_with_help(&small, pair, 2, &custom));
     mm_action_view other = mm_actions_local(&small);
     mm_action_output_init(&out, reply, sizeof reply);
     CHECK(dispatch(&other, "?", MM_ACTION_LITERAL) && !strcmp(reply, "legacy"));
-    CHECK(dispatch(&other, "show actions", MM_ACTION_LITERAL) && strstr(reply, "help (?)"));
+    CHECK(dispatch(&other, "show actions", MM_ACTION_LITERAL) &&
+          strstr(reply, "help (?)") && strstr(reply, "show actions (show action)"));
+    CHECK(dispatch(&other, "show action", MM_ACTION_LITERAL) &&
+          strstr(reply, "help (?)") && strstr(reply, "show actions (show action)"));
+    CHECK(!dispatch(&other, "show action extra", MM_ACTION_LITERAL));
     local = mm_actions_local(&registry);
     remote = mm_actions_remote(&registry, admitted, (void *)&check);
     mm_action_output_init(&out, reply, sizeof reply);
@@ -183,10 +191,19 @@ static void visibility(void)
     CHECK(mm_actions_visit(&remote, NULL, NULL) == registry.count - 1);
     CHECK(dispatch(&local, "help ping", MM_ACTION_QUOTED));
     CHECK(strstr(reply, "node check (ping)") && strstr(reply, "Check node."));
+    CHECK(dispatch(&local, "help show action", MM_ACTION_QUOTED));
+    CHECK(!strcmp(reply, "show actions (show action)  List available actions.\n"));
+    CHECK(dispatch(&local, "help show actions", MM_ACTION_QUOTED));
+    CHECK(!strcmp(reply, "show actions (show action)  List available actions.\n"));
     CHECK(dispatch(&remote, "help", MM_ACTION_QUOTED));
     CHECK(strstr(reply, "node (n)") && !strstr(reply, "ping"));
     CHECK(dispatch(&remote, "show actions", MM_ACTION_QUOTED));
     CHECK(!strstr(reply, "node check"));
+    CHECK(dispatch(&remote, "show action", MM_ACTION_QUOTED));
+    CHECK(strstr(reply, "show actions (show action)") && !strstr(reply, "node check"));
+    mm_action_view no_show = mm_actions_remote(&registry, admitted, (void *)registry.slots[1]);
+    CHECK(!dispatch(&no_show, "show action", MM_ACTION_QUOTED) && !strcmp(reply, "Unknown action."));
+    CHECK(!dispatch(&no_show, "help show action", MM_ACTION_QUOTED) && !strcmp(reply, "Unknown action."));
     CHECK(!dispatch(&remote, "help node\tcheck", MM_ACTION_QUOTED));
     CHECK(!dispatch(&remote, "help ping", MM_ACTION_QUOTED));
     unsigned before = calls;

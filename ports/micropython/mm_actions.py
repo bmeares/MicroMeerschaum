@@ -5,8 +5,21 @@ _PROMPT = "[ journal:local ] > "
 MAX_LINE = 4224
 _FLAGS = {"-c": 0, "-m": 1, "-l": 2, "-i": 3}
 _ALIASES = {"--connector-keys": "-c", "--metric-keys": "-m", "--location-keys": "-l",
-            "--mrsm-instance": "-i", "--instance": "-i"}
+            "--mrsm-instance": "-i", "--instance": "-i", "--target-instance": "-I"}
 _BUILTINS = ("help", "show actions", "show pipes", "sync pipes", "copy pipes")
+_BUILTIN_ALIASES = {
+    "show actions": "show action",
+    "show pipes": "show pipe",
+    "sync pipes": "sync pipe",
+    "copy pipes": "copy pipe",
+}
+_BUILTIN_HELP = {
+    "help": "help [ACTION]",
+    "show actions": "List available actions.",
+    "show pipes": "List matching configured Pipes.",
+    "sync pipes": "Fetch and commit rows from matching source Pipes.",
+    "copy pipes": "copy pipes [-I] DESTINATION [-c CONNECTOR] [-m METRIC] [-l LOCATION] [-i INSTANCE]",
+}
 
 
 def _words(line):
@@ -49,24 +62,71 @@ def _arguments(tail):
     return words
 
 
+def _is_destination(word):
+    return word.startswith(("api:", "peer:")) and bool(word.split(":", 1)[1])
+
+
 def _selection(words, copy):
     selectors, destination = {}, None
+    explicit_target = copy and any(_ALIASES.get(w, w) == "-I" for w in words)
     i = 0
     while i < len(words):
         word = _ALIASES.get(words[i], words[i])
         i += 1
         if word in _FLAGS:
-            if i == len(words) or _ALIASES.get(words[i], words[i]) in _FLAGS or word in selectors:
-                raise ValueError("expected one value for " + word)
-            selectors[word] = words[i]
+            values = selectors.setdefault(word, [])
+            added = 0
+            while i < len(words):
+                nxt = words[i]
+                if nxt.startswith("-"):
+                    break
+                if (added > 0 and copy and destination is None and
+                        not explicit_target and _is_destination(nxt)):
+                    break
+                if not nxt and word != "-l":
+                    raise ValueError("expected a non-empty value for " + word)
+                values.append(nxt)
+                added += 1
+                i += 1
+            if not added:
+                raise ValueError("expected at least one value for " + word)
+        elif copy and word == "-I":
+            if destination is not None:
+                raise ValueError("conflicting destination argument")
+            if i == len(words) or words[i].startswith("-") or not _is_destination(words[i]):
+                raise ValueError("expected a provisioned destination for -I")
+            destination = words[i]
             i += 1
-        elif copy and destination is None and word.startswith(("api:", "peer:")) and word.split(":", 1)[1]:
+        elif copy and destination is None and _is_destination(word):
             destination = word
         else:
             raise ValueError("unexpected argument " + word)
     if copy and destination is None:
         raise ValueError("copy pipes requires a provisioned destination")
     return selectors, destination
+
+
+def _match_token(value, token, is_location):
+    if is_location:
+        if token in ("", "[None]"):
+            return value is None
+        if token == "None":
+            return value is None or value == "None"
+    return value == token
+
+
+def _match_selector(value, tokens, is_location):
+    has_positive = False
+    found = False
+    for token in tokens:
+        if token.startswith("_"):
+            if _match_token(value, token[1:], is_location):
+                return False
+        else:
+            has_positive = True
+            if _match_token(value, token, is_location):
+                found = True
+    return (not has_positive) or found
 
 
 def _identity(pipe):
@@ -90,14 +150,20 @@ class Exposure:
             return False
 
     def matches(self, selectors):
-        for flag, value in selectors.items():
+        for flag, tokens in selectors.items():
             field = self.identity[_FLAGS[flag]]
-            if field != (None if flag == "-l" and value in ("None", "") else value):
+            if not _match_selector(field, tokens, flag == "-l"):
                 return False
         return True
 
     def label(self):
-        return " ".join(str(value) for value in self.identity)
+        connector, metric, location, instance = self.identity
+        parts = [repr(connector), repr(metric)]
+        if location is not None:
+            parts.append(repr(location))
+        if instance != "journal:local":
+            parts.append("instance=" + repr(instance))
+        return "Pipe(" + ", ".join(parts) + ")"
 
 
 def _validate_action_name(name):
@@ -123,12 +189,42 @@ class ActionRegistry:
     def __init__(self):
         self._custom = {}
         self._help = {}
+        self._aliases = {}
         self._pipes = {}
         self._next_id = 1
 
-    def make_action(self, name=None, help=None):
+    def _alias_for(self, name):
+        return _BUILTIN_ALIASES.get(name, self._aliases.get(name))
+
+    def _canonical_name(self, name):
+        if name in _BUILTINS or name in self._custom:
+            return name
+        for canon, alias in _BUILTIN_ALIASES.items():
+            if alias == name:
+                return canon
+        for canon, alias in self._aliases.items():
+            if alias == name:
+                return canon
+        return None
+
+    def _taken(self, candidate):
+        return self._canonical_name(candidate) is not None
+
+    def _describe(self, name):
+        text = name
+        alias = self._alias_for(name)
+        if alias:
+            text += " (" + alias + ")"
+        summary = self.help_for(name)
+        if summary:
+            text += "  " + summary
+        return text
+
+    def make_action(self, name=None, help=None, alias=None):
         if help is not None and not isinstance(help, str):
             raise ValueError("expected a help string")
+        if alias is not None:
+            _validate_action_name(alias)
 
         def register(action_name, function):
             if not callable(function):
@@ -139,9 +235,13 @@ class ActionRegistry:
                     raise ValueError("expected a canonical action name")
                 action_name = raw.replace("_", " ")
             _validate_action_name(action_name)
-            if action_name in _BUILTINS or action_name in self._custom:
+            if alias is not None and alias == action_name:
+                raise ValueError("action alias must differ from name")
+            if self._taken(action_name) or (alias is not None and self._taken(alias)):
                 raise ValueError("action already registered")
             self._custom[action_name] = function
+            if alias is not None:
+                self._aliases[action_name] = alias
             summary = (_first_doc_line(help) if help is not None
                        else _first_doc_line(getattr(function, "__doc__", None)))
             if summary:
@@ -152,11 +252,22 @@ class ActionRegistry:
             return register(None, name)
         if name is not None:
             _validate_action_name(name)
+            if alias is not None and alias == name:
+                raise ValueError("action alias must differ from name")
+            if self._taken(name):
+                raise ValueError("action already registered")
+        if alias is not None and self._taken(alias):
+            raise ValueError("action already registered")
         return lambda function: register(name, function)
 
     def help_for(self, name):
         """Return the stored one-line help text for a registered action, or None."""
-        return self._help.get(name)
+        canon = self._canonical_name(name)
+        if canon is None:
+            return None
+        if canon in _BUILTIN_HELP:
+            return _BUILTIN_HELP[canon]
+        return self._help.get(canon)
 
     def entries(self):
         """Snapshot live exposures in registration order."""
@@ -197,15 +308,38 @@ class ActionRegistry:
             prefix += " "
         return [name for name in self.names(allowed) if name.startswith(prefix)]
 
+    def _help_action(self, name, args, allowed):
+        visible = self.names(allowed)
+        if name == "show actions":
+            if args:
+                return False, "Usage: show actions"
+            return bool(visible), "\n".join(self._describe(n) for n in visible) if visible else "no matching actions"
+        if not args:
+            return bool(visible), "\n".join(self._describe(n) for n in visible) if visible else "no matching actions"
+        query = " ".join(args)
+        for canon in visible:
+            if query == canon or query == self._alias_for(canon):
+                return True, self._describe(canon)
+        matched = []
+        for canon in visible:
+            alias = self._alias_for(canon)
+            if canon.startswith(query) or (alias and alias.startswith(query)):
+                matched.append(self._describe(canon))
+        if matched:
+            return True, "\n".join(matched)
+        return False, "unknown action"
+
     def dispatch(self, line, allowed=None):
         """Run the longest matching action, passing its remaining words to the handler."""
         try:
             words = _words(line)
             name, i = None, 0
-            for candidate in self.names():
-                head = candidate.split(" ")
-                if len(head) > i and words[:len(head)] == head:
-                    name, i = candidate, len(head)
+            for canon in self.names():
+                alias = self._alias_for(canon)
+                for candidate in (canon, alias) if alias else (canon,):
+                    head = candidate.split(" ")
+                    if len(head) > i and words[:len(head)] == head:
+                        name, i = canon, len(head)
             if name is None:
                 raise ValueError("unknown action")
             if allowed is not None and name not in allowed:
@@ -225,8 +359,7 @@ class ActionRegistry:
                     raise ValueError("action must return (bool, message)")
                 return result
             if name in ("help", "show actions"):
-                names = self.complete(" ".join(args), allowed)
-                return bool(names), "\n".join(names) if names else "no matching actions"
+                return self._help_action(name, args, allowed)
             return self._pipe_action(name, args, allowed is not None)
         except Exception as error:
             return False, str(error)
@@ -252,7 +385,7 @@ class ActionRegistry:
         for entry in selected:
             result = entry.pipe.sync() if name == "sync pipes" else entry.pipe.copy_to(destination)
             ok = ok and result[0]
-            results.append(entry.label() + "  " + result[1])
+            results.append(("+ " if result[0] else "- ") + entry.label() + "  " + result[1])
         return ok, "\n".join(results)
 
     def shell(self, reader=None, writer=None):
