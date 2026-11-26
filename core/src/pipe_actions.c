@@ -12,6 +12,8 @@ typedef struct {
 typedef struct {
     selector connector, metric, location, instance;
     const char *destination;
+    mm_pipe_data_request data;
+    bool has_limit;
 } selection;
 
 static bool fail(mm_action_output *out, const char *s)
@@ -23,6 +25,26 @@ static bool fail(mm_action_output *out, const char *s)
 static bool is_flag(const char *word)
 {
     return word[0] == '-';
+}
+
+static bool is_bound_value(const char *word)
+{
+    if (!word || !*word) return false;
+    if (word[0] == '-') return word[1] >= '0' && word[1] <= '9';
+    return true;
+}
+
+static bool parse_limit(const char *word, size_t *out)
+{
+    if (!word || !*word) return false;
+    size_t val = 0;
+    for (const char *p = word; *p; p++) {
+        if (*p < '0' || *p > '9') return false;
+        val = val * 10u + (size_t)(*p - '0');
+        if (val > MM_PIPE_DATA_MAX_LIMIT) return false;
+    }
+    *out = val;
+    return true;
 }
 
 static bool has_target_flag(const mm_action_call *call)
@@ -45,6 +67,7 @@ static bool is_destination_hint(const mm_pipe_action_config *cfg, const char *wo
 static bool parse(const mm_pipe_action_config *cfg, const mm_action_call *call,
                   mm_pipe_action_kind op, selection *s)
 {
+    s->data.limit = MM_PIPE_DATA_DEFAULT_LIMIT;
     bool explicit_target = op == MM_PIPE_COPY && has_target_flag(call);
     for (size_t i = 0; i < call->argc; ) {
         const char *word = call->argv[i++];
@@ -53,7 +76,23 @@ static bool parse(const mm_pipe_action_config *cfg, const mm_action_call *call,
         else if (!strcmp(word, "-m") || !strcmp(word, "--metric-keys")) field = &s->metric;
         else if (!strcmp(word, "-l") || !strcmp(word, "--location-keys")) field = &s->location;
         else if (!strcmp(word, "-i") || !strcmp(word, "--mrsm-instance") || !strcmp(word, "--instance")) field = &s->instance;
-        else if (op == MM_PIPE_COPY && (!strcmp(word, "-I") || !strcmp(word, "--target-instance"))) {
+        else if (op == MM_PIPE_DATA && !strcmp(word, "--limit")) {
+            if (s->has_limit || i == call->argc || !parse_limit(call->argv[i], &s->data.limit))
+                return false;
+            s->has_limit = true;
+            i++;
+            continue;
+        } else if (op == MM_PIPE_DATA && !strcmp(word, "--begin")) {
+            if (s->data.begin || i == call->argc || !is_bound_value(call->argv[i]))
+                return false;
+            s->data.begin = call->argv[i++];
+            continue;
+        } else if (op == MM_PIPE_DATA && !strcmp(word, "--end")) {
+            if (s->data.end || i == call->argc || !is_bound_value(call->argv[i]))
+                return false;
+            s->data.end = call->argv[i++];
+            continue;
+        } else if (op == MM_PIPE_COPY && (!strcmp(word, "-I") || !strcmp(word, "--target-instance"))) {
             if (s->destination || i == call->argc || !*call->argv[i] || is_flag(call->argv[i]))
                 return false;
             s->destination = call->argv[i++];
@@ -342,5 +381,222 @@ bool mm_pipe_actions_register(mm_actions *r, mm_pipe_actions *bindings, const mm
     }
     *bindings = next;
     for (size_t i = 0; i < 3; i++) r->slots[start + i] = &bindings->descriptors[i];
+    return true;
+}
+
+static bool inspect_pipes(mm_pipe_action_kind op, const mm_action_call *call,
+                          mm_action_output *out, void *ctx)
+{
+    const mm_pipe_inspect_actions *b = ctx;
+    const mm_pipe_action_config *cfg = b->pipes;
+    const mm_pipe_inspect_config *ins = b->inspect;
+    selection s = {0};
+    if (!parse(cfg, call, op, &s)) return fail(out, "Invalid Pipe action arguments.");
+
+    size_t found = 0;
+    identity id;
+    for (size_t i = 0; i < cfg->pipe_count; i++) {
+        const mm_action_pipe *p = &cfg->pipes[i];
+        if (!admitted(cfg, call->view, p, MM_PIPE_SHOW, NULL)) continue;
+        identify(p, &id);
+        if (!selected(&s, p, &id)) continue;
+        found++;
+        if (!admitted(cfg, call->view, p, op, NULL)) return fail(out, "Pipe operation denied.");
+    }
+    if (!found) {
+        mm_action_puts(out, "No matching Pipes.");
+        return true;
+    }
+
+    bool all_ok = true;
+    for (size_t i = 0; i < cfg->pipe_count; i++) {
+        const mm_action_pipe *p = &cfg->pipes[i];
+        if (!admitted(cfg, call->view, p, MM_PIPE_SHOW, NULL)) continue;
+        identify(p, &id);
+        if (!selected(&s, p, &id)) continue;
+        if (!admitted(cfg, call->view, p, op, NULL)) return fail(out, "Pipe operation denied.");
+        char text[128];
+        if (op == MM_PIPE_DATA) {
+            print_pipe(out, &id, p);
+            mm_action_puts(out, "\n");
+            if (!ins->data(p, &s.data, out, ins->user)) all_ok = false;
+        } else if (op == MM_PIPE_COLUMNS) {
+            print_pipe(out, &id, p);
+            mm_action_puts(out, "\n");
+            if (!ins->columns(p, out, ins->user)) all_ok = false;
+        } else if (op == MM_PIPE_ROWCOUNT) {
+            uint64_t count = 0;
+            if (ins->rowcount(p, &count, ins->user)) {
+                print_pipe(out, &id, p);
+                snprintf(text, sizeof text, "  %" PRIu64 "\n", count);
+                mm_action_puts(out, text);
+            } else {
+                all_ok = false;
+                mm_action_puts(out, "- ");
+                print_pipe(out, &id, p);
+                mm_action_puts(out, "  rowcount unavailable\n");
+            }
+        } else if (op == MM_PIPE_PROGRESS) {
+            mm_pipe_progress prog = {0};
+            if (ins->progress(p, &prog, ins->user)) {
+                print_pipe(out, &id, p);
+                snprintf(text, sizeof text,
+                         "  prefix=%" PRIu64 " high=%" PRIu64 " confirmed=%" PRIu64 " missed=%" PRIu64 "\n",
+                         prog.prefix, prog.high, prog.confirmed, prog.missed);
+                mm_action_puts(out, text);
+            } else {
+                all_ok = false;
+                mm_action_puts(out, "- ");
+                print_pipe(out, &id, p);
+                mm_action_puts(out, "  progress unavailable\n");
+            }
+        }
+        if (out->truncated) break;
+    }
+    return all_ok;
+}
+
+static bool show_data(const mm_action_call *call, mm_action_output *out, void *ctx)
+{
+    return inspect_pipes(MM_PIPE_DATA, call, out, ctx);
+}
+
+static bool show_columns(const mm_action_call *call, mm_action_output *out, void *ctx)
+{
+    return inspect_pipes(MM_PIPE_COLUMNS, call, out, ctx);
+}
+
+static bool show_rowcounts(const mm_action_call *call, mm_action_output *out, void *ctx)
+{
+    return inspect_pipes(MM_PIPE_ROWCOUNT, call, out, ctx);
+}
+
+static bool show_progress(const mm_action_call *call, mm_action_output *out, void *ctx)
+{
+    return inspect_pipes(MM_PIPE_PROGRESS, call, out, ctx);
+}
+
+static bool valid_connector_type(const char *word)
+{
+    return !strcmp(word, "journal") || !strcmp(word, "sql") ||
+           !strcmp(word, "peer") || !strcmp(word, "api");
+}
+
+static bool connector_matches_type(const char *name, const char *filter)
+{
+    if (!filter) return true;
+    size_t len = strlen(filter);
+    return !strncmp(name, filter, len) && name[len] == ':';
+}
+
+static bool seen_instance_before(const mm_pipe_action_config *cfg, const mm_action_view *view,
+                                 size_t limit, const char *name)
+{
+    for (size_t i = 0; i < limit; i++) {
+        const mm_action_pipe *p = &cfg->pipes[i];
+        if (!admitted(cfg, view, p, MM_PIPE_SHOW, NULL)) continue;
+        if (!strcmp(p->instance, name)) return true;
+    }
+    return false;
+}
+
+static bool show_connectors(const mm_action_call *call, mm_action_output *out, void *ctx)
+{
+    const mm_pipe_action_config *cfg = ((const mm_pipe_inspect_actions *)ctx)->pipes;
+    const char *filter = NULL;
+    if (call->argc > 1) return fail(out, "Invalid Pipe action arguments.");
+    if (call->argc == 1) {
+        if (!valid_connector_type(call->argv[0])) return fail(out, "Invalid Pipe action arguments.");
+        filter = call->argv[0];
+    }
+    size_t emitted = 0;
+    for (size_t i = 0; i < cfg->pipe_count; i++) {
+        const mm_action_pipe *p = &cfg->pipes[i];
+        if (!admitted(cfg, call->view, p, MM_PIPE_SHOW, NULL)) continue;
+        if (!connector_matches_type(p->instance, filter)) continue;
+        if (seen_instance_before(cfg, call->view, i, p->instance)) continue;
+        mm_action_puts(out, p->instance);
+        mm_action_puts(out, "\n");
+        emitted++;
+    }
+    for (size_t i = 0; i < cfg->destination_count; i++) {
+        const char *name = cfg->destinations[i].name;
+        if (!connector_matches_type(name, filter)) continue;
+        if (seen_instance_before(cfg, call->view, cfg->pipe_count, name)) continue;
+        mm_action_puts(out, name);
+        mm_action_puts(out, "\n");
+        emitted++;
+    }
+    if (!emitted) mm_action_puts(out, "No matching connectors.");
+    return true;
+}
+
+static bool show_version(const mm_action_call *call, mm_action_output *out, void *ctx)
+{
+    const mm_pipe_inspect_config *ins = ((const mm_pipe_inspect_actions *)ctx)->inspect;
+    if (call->argc) return fail(out, "Usage: show version");
+    const char *label = (ins && ins->version) ? ins->version
+                                              : "MicroMeerschaum " MM_VERSION_STRING " (native)";
+    mm_action_puts(out, label);
+    mm_action_puts(out, "\n");
+    return true;
+}
+
+bool mm_pipe_inspect_register(mm_actions *r, mm_pipe_inspect_actions *bindings,
+                              const mm_pipe_action_config *pipes,
+                              const mm_pipe_inspect_config *inspect)
+{
+    if (!r || !bindings || !valid_config(pipes)) return false;
+    if (inspect && inspect->version && !valid_text(inspect->version)) return false;
+
+    mm_pipe_inspect_actions next = {.pipes = pipes, .inspect = inspect, .count = 0};
+    if (inspect && inspect->data) {
+        next.descriptors[next.count++] = (mm_action){
+            "show data", "show datum",
+            "show data [-c CONNECTOR] [-m METRIC] [-l LOCATION] [-i INSTANCE] [--limit N] [--begin VAL] [--end VAL]",
+            show_data, bindings
+        };
+    }
+    if (inspect && inspect->columns) {
+        next.descriptors[next.count++] = (mm_action){
+            "show columns", "show column",
+            "Show declared columns and types for matching Pipes.",
+            show_columns, bindings
+        };
+    }
+    if (inspect && inspect->rowcount) {
+        next.descriptors[next.count++] = (mm_action){
+            "show rowcounts", "show rowcount",
+            "Show local row counts for matching Pipes.",
+            show_rowcounts, bindings
+        };
+    }
+    if (inspect && inspect->progress) {
+        next.descriptors[next.count++] = (mm_action){
+            "show progress", NULL,
+            "Show delivery cursor state for matching Pipes.",
+            show_progress, bindings
+        };
+    }
+    next.descriptors[next.count++] = (mm_action){
+        "show connectors", "show connector",
+        "List active local storage instances and provisioned destinations.",
+        show_connectors, bindings
+    };
+    next.descriptors[next.count++] = (mm_action){
+        "show version", NULL,
+        "Show MicroMeerschaum version and runtime.",
+        show_version, bindings
+    };
+
+    size_t start = r->count;
+    for (size_t i = 0; i < next.count; i++) {
+        if (!mm_actions_register(r, &next.descriptors[i])) {
+            while (r->count > start) r->slots[--r->count] = NULL;
+            return false;
+        }
+    }
+    *bindings = next;
+    for (size_t i = 0; i < bindings->count; i++) r->slots[start + i] = &bindings->descriptors[i];
     return true;
 }

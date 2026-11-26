@@ -62,7 +62,16 @@ assert not registry.dispatch('field "unfinished')[0]
 assert registry.dispatch("field private", ("field",))[0] is False
 assert len(calls) == 1
 assert registry.dispatch("help", ("help", "field")) == (True, "field\nhelp  help [ACTION]")
-assert registry.complete("show ") == ["show actions", "show pipes"]
+assert registry.complete("show ") == [
+    "show actions",
+    "show columns",
+    "show connectors",
+    "show data",
+    "show pipes",
+    "show progress",
+    "show rowcounts",
+    "show version",
+]
 ok, msg = registry.dispatch("sync pipes")
 assert ok and msg == "+ Pipe('plugin:test_source', 'room', 'north')  committed 1 input row"
 assert source.get_docs() == [{"value": 41}]
@@ -511,3 +520,123 @@ for bad_call in (
 p_local.close()
 p_alt.close()
 print("interactive shell greeting, dynamic prompt, instance scoping, ANSI/Unicode, clear, ?, and history")
+
+# Built-in inspection actions: show data/columns/rowcounts/progress/connectors/version.
+insp_reg = ActionRegistry()
+jp = provision("sensor", "inspect_j", root + "/inspect-j.mm", 1, 41, 2, create=True)
+jp_noread = provision("sensor", "inspect_nr", root + "/inspect-nr.mm", 1, 42, 2,
+                      location="east", create=True)
+jp_hidden = provision("sensor", "inspect_hidden", root + "/inspect-hid.mm", 1, 43, 2,
+                      instance="journal:secret", create=True)
+assert jp.sync([{"tick": 1, "note": "a"}, {"tick": 2, "note": "b"}, {"tick": 3, "note": "c"}])[0]
+assert jp_noread.sync([{"tick": 9}])[0]
+assert jp_hidden.sync([{"tick": 99}])[0]
+insp_reg.expose(jp, read=True, write=True)
+insp_reg.expose(jp_noread, read=False, write=False)
+
+# show version + help/aliases
+ok, ver = insp_reg.dispatch("show version")
+assert ok and ver == "MicroMeerschaum 0.2.1 (MicroPython)", ver
+assert not insp_reg.dispatch("show version extra")[0]
+assert insp_reg.dispatch("help show datum")[0] and "show data (show datum)" in insp_reg.dispatch("help show datum")[1]
+assert insp_reg.dispatch("help show column")[0] and "show columns (show column)" in insp_reg.dispatch("help show column")[1]
+assert insp_reg.dispatch("help show rowcount")[0] and "show rowcounts (show rowcount)" in insp_reg.dispatch("help show rowcount")[1]
+assert insp_reg.dispatch("help show connector")[0] and "show connectors (show connector)" in insp_reg.dispatch("help show connector")[1]
+assert insp_reg.dispatch("help show progress")[0] and "show progress" in insp_reg.dispatch("help show progress")[1]
+assert insp_reg.dispatch("help show version")[0] and "show version" in insp_reg.dispatch("help show version")[1]
+
+# show data / show datum on journal pipes
+ok, out = insp_reg.dispatch("show data -m inspect_j --limit 2")
+assert ok and out.startswith("Pipe('sensor', 'inspect_j')\n") and "'tick': 1" in out and "'tick': 2" in out and "'tick': 3" not in out, out
+ok, out = insp_reg.dispatch("show datum -m inspect_j --limit 0")
+assert ok and out == "Pipe('sensor', 'inspect_j')\n  (no rows)", out
+assert not insp_reg.dispatch("show data -m inspect_j --begin 1")[0]
+assert not insp_reg.dispatch("show data -m inspect_j --end 2")[0]
+for bad_data in (
+    "show data --limit 129",
+    "show data --limit -1",
+    "show data --limit nope",
+    "show data --limit 1 --limit 2",
+    "show data --begin",
+    "show data --begin -c sensor",
+    "show data --begin 1 --begin 2",
+    "show data --end",
+    "show data --end 1 --end 2",
+    "show data --unknown 1",
+):
+    assert not insp_reg.dispatch(bad_data)[0], bad_data
+
+# show columns / show rowcounts / show progress on journal pipes
+ok, out = insp_reg.dispatch("show column -m inspect_j")
+assert ok and out == "Pipe('sensor', 'inspect_j')\n  (no fixed schema; journal pipe)", out
+ok, out = insp_reg.dispatch("show rowcount -m inspect_j")
+assert ok and out == "Pipe('sensor', 'inspect_j')  3", out
+ok, out = insp_reg.dispatch("show progress -m inspect_j")
+assert ok and out == "Pipe('sensor', 'inspect_j')  prefix=3 high=3 confirmed=0 missed=0", out
+ok, out = insp_reg.dispatch("show data -c nonexistent")
+assert ok and out == "no matching Pipes", out
+
+# show connectors / show connector (local sees hidden journal:secret; remote does NOT)
+ok, out = insp_reg.dispatch("show connectors")
+assert ok and "journal:local" in out and "journal:secret" in out and "peer:archive" in out, out
+ok, out = insp_reg.dispatch("show connector peer")
+assert ok and out == "peer:archive", out
+ok, out = insp_reg.dispatch("show connector api")
+assert ok and out == "no matching connectors", out
+assert not insp_reg.dispatch("show connectors bogus")[0]
+assert not insp_reg.dispatch("show connectors peer extra")[0]
+
+# Bounded reply truncation for large journal rows (fits within 4096-byte session frame)
+jp_big = provision("sensor", "inspect_big", root + "/inspect-big.mm", 1, 44, 2, create=True)
+assert jp_big.sync({"text": ["x" * 1400] * 3})[0]
+insp_reg.expose(jp_big, read=True, write=False)
+
+# Remote allowlist and read-permission enforcement via DeviceSession
+deny_session = DeviceSession(insp_reg, ("action",), ("help",))
+for cmd in (
+    "show data", "show datum", "show columns", "show column",
+    "show rowcounts", "show rowcount", "show progress",
+    "show connectors", "show connector", "show version",
+):
+    rep = json.loads(deny_session.handle(frame("action", line=cmd)[:-1])[len(PREFIX):])
+    assert not rep["ok"], (cmd, rep)
+
+inspect_session = DeviceSession(
+    insp_reg,
+    ("action",),
+    ("show data", "show columns", "show rowcounts", "show progress", "show connectors", "show version"),
+)
+
+
+def icall(line):
+    raw = inspect_session.handle(frame("action", line=line)[:-1])
+    assert raw is not None and len(raw) <= 4096, (line, len(raw) if raw else None)
+    return json.loads(raw[len(PREFIX):])
+
+
+assert icall("show version") == {"v": 1, "id": "123", "ok": True, "data": "MicroMeerschaum 0.2.1 (MicroPython)"}
+conn_rep = icall("show connectors")
+assert conn_rep["ok"] and "journal:local" in conn_rep["data"] and "peer:archive" in conn_rep["data"], conn_rep
+assert "journal:secret" not in conn_rep["data"], conn_rep
+assert icall("show data -m inspect_j --limit 1")["ok"]
+assert icall("show datum -m inspect_j --limit 1")["ok"]
+assert icall("show columns -m inspect_j")["ok"]
+assert icall("show rowcounts -m inspect_j")["data"] == "Pipe('sensor', 'inspect_j')  3"
+assert icall("show progress -m inspect_j")["data"] == "Pipe('sensor', 'inspect_j')  prefix=3 high=3 confirmed=0 missed=0"
+# Oversized journal output truncates cleanly within DeviceSession frame limit
+big_rep = icall("show data -m inspect_big --limit 3")
+assert big_rep["ok"] and "... (truncated)" in big_rep["data"], big_rep
+# Remote read=False pipe is denied on all pipe-scoped inspection actions
+for cmd in (
+    "show data -l east", "show columns -l east", "show rowcounts -l east", "show progress -l east",
+    "show data", "show rowcounts",
+):
+    rep = icall(cmd)
+    assert not rep["ok"] and "denied" in rep["error"].lower(), (cmd, rep)
+# Hidden/unexposed pipe is never disclosed
+assert icall("show data -m inspect_hidden")["data"] == "no matching Pipes"
+assert icall("show rowcounts -i journal:secret")["data"] == "no matching Pipes"
+
+for pipe in (jp, jp_noread, jp_hidden, jp_big):
+    pipe.close()
+print("built-in inspection actions (journal, remote allowlist, read gating, bounded truncation)")

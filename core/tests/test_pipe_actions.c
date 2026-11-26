@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #define _POSIX_C_SOURCE 200809L
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,12 +50,18 @@ static mm_journal_status deliver(const mm_action_pipe *p, mm_send_result *result
     return mm_send_window(p->user, 22, exchange, link, batch, sizeof batch, 2, result);
 }
 
-typedef struct { bool list_push, sync, copy; } permission;
+typedef struct { bool list_push, sync, copy, read; } permission;
 
 static bool allow_action(const mm_action *a, void *ctx)
 {
     (void)a;
     return ctx != NULL;
+}
+
+static bool allow_only_version(const mm_action *a, void *ctx)
+{
+    (void)ctx;
+    return !strcmp(a->name, "show version");
 }
 
 static bool allow_pipe(const mm_action_view *v, const mm_action_pipe *p, mm_pipe_action_kind op,
@@ -64,7 +71,115 @@ static bool allow_pipe(const mm_action_view *v, const mm_action_pipe *p, mm_pipe
     if (v->local) return true;
     const permission *session = v->user;
     if (op == MM_PIPE_SHOW) return p->pipe->fetch || session->list_push;
-    return op == MM_PIPE_SYNC ? session->sync : session->copy && dest && !strcmp(dest->name, "peer:lab");
+    if (op == MM_PIPE_SYNC) return session->sync;
+    if (op == MM_PIPE_COPY) return session->copy && dest && !strcmp(dest->name, "peer:lab");
+    return session->read;
+}
+
+typedef struct {
+    bool is_sql;
+    mm_journal *journal;
+    bool fail_inspect;
+    unsigned data_calls;
+    size_t last_limit;
+    char last_begin[64];
+    char last_end[64];
+} inspect_state;
+
+static bool inspect_data(const mm_action_pipe *p, const mm_pipe_data_request *req,
+                         mm_action_output *out, void *ctx)
+{
+    (void)ctx;
+    inspect_state *st = p->user;
+    if (!st) return false;
+    st->data_calls++;
+    st->last_limit = req->limit;
+    snprintf(st->last_begin, sizeof st->last_begin, "%s", req->begin ? req->begin : "");
+    snprintf(st->last_end, sizeof st->last_end, "%s", req->end ? req->end : "");
+    if (!st->is_sql) {
+        if (req->begin || req->end) {
+            mm_action_puts(out, "  journal pipes do not support --begin or --end\n");
+            return false;
+        }
+        uint64_t seq = 1;
+        size_t shown = 0;
+        while (shown < req->limit && mm_journal_next(st->journal, seq, &seq) == MM_JOURNAL_OK) {
+            uint8_t buf[128];
+            size_t n = 0;
+            mm_record rec;
+            mm_field fields[4];
+            size_t fc = 0;
+            if (mm_journal_read(st->journal, seq, buf, sizeof buf, &n) == MM_JOURNAL_OK &&
+                mm_record_decode(buf, n, &rec, &n) == MM_OK && rec.kind == MM_KIND_DATA &&
+                mm_document_decode(rec.payload, rec.len, fields, 4, &fc) == MM_OK && fc == 1) {
+                char line[64];
+                snprintf(line, sizeof line, "  {tick: %" PRId64 "}\n", fields[0].value.as.integer);
+                mm_action_puts(out, line);
+                shown++;
+            }
+            seq++;
+        }
+        if (!shown) mm_action_puts(out, "  (no rows)\n");
+        return true;
+    }
+    if (req->limit == 0) {
+        mm_action_puts(out, "  (no rows)\n");
+        return true;
+    }
+    char line[128];
+    snprintf(line, sizeof line, "  sql limit=%zu begin=%s end=%s\n", req->limit,
+             req->begin ? req->begin : "-", req->end ? req->end : "-");
+    mm_action_puts(out, line);
+    return true;
+}
+
+static bool inspect_columns(const mm_action_pipe *p, mm_action_output *out, void *ctx)
+{
+    (void)ctx;
+    const inspect_state *st = p->user;
+    if (!st) return false;
+    if (st->is_sql) {
+        mm_action_puts(out, "  tick: int [axis]\n  station: string [key]\n  celsius: float\n");
+    } else {
+        mm_action_puts(out, "  (no fixed schema; journal pipe)\n");
+    }
+    return true;
+}
+
+static bool inspect_rowcount(const mm_action_pipe *p, uint64_t *count, void *ctx)
+{
+    (void)ctx;
+    const inspect_state *st = p->user;
+    if (!st || st->fail_inspect) return false;
+    if (st->is_sql) {
+        *count = 3;
+        return true;
+    }
+    uint64_t seq = 1, n = 0;
+    while (mm_journal_next(st->journal, seq, &seq) == MM_JOURNAL_OK) {
+        n++;
+        seq++;
+    }
+    *count = n;
+    return true;
+}
+
+static bool inspect_progress(const mm_action_pipe *p, mm_pipe_progress *prog, void *ctx)
+{
+    (void)ctx;
+    const inspect_state *st = p->user;
+    if (!st || st->fail_inspect) return false;
+    if (st->is_sql) {
+        *prog = (mm_pipe_progress){5, 5, 2, 0};
+        return true;
+    }
+    *prog = (mm_pipe_progress){
+        mm_journal_prefix(st->journal),
+        mm_journal_high(st->journal),
+        mm_journal_confirmed(st->journal),
+        mm_journal_missed(st->journal)
+    };
+    return true;
 }
 
 static uint64_t clock_us(void *ctx)
@@ -138,7 +253,7 @@ int main(void)
     CHECK(mm_pipe_actions_register(&registry, &bindings, &cfg));
     CHECK(!mm_pipe_actions_register(&registry, &bindings, &cfg));
     mm_action_view local = mm_actions_local(&registry);
-    permission session = {false, false, false};
+    permission session = {false, false, false, false};
     mm_action_view remote = mm_actions_remote(&registry, allow_action, &session);
 
     /* Pipe(...) formatting and singular aliases. */
@@ -269,6 +384,179 @@ int main(void)
     CHECK(run(mm_actions_local(&other_registry), "sync pipes") && strstr(message, "No configured"));
     CHECK(run(mm_actions_remote(&other_registry, allow_action, &session), "show pipes") &&
           strstr(message, "No matching"));
+
+    /* Opt-in inspection actions: minimal (connectors + version only), partial, and full. */
+    inspect_state journal_state = {.is_sql = false, .journal = origin};
+    inspect_state sql_state = {.is_sql = true, .journal = NULL};
+    const mm_action_pipe inspect_list[] = {
+        {&sensor, "journal:local", &journal_state},
+        {&push_only, "sql:local", &sql_state}
+    };
+    const mm_action_destination dests[] = {
+        {"peer:lab", deliver, &link},
+        {"api:main", deliver, &link}
+    };
+    mm_pipe_action_config inspect_pipes_cfg = {inspect_list, 2, dests, 2, allow_pipe, clock_us, 12, NULL};
+
+    /* Minimal registration (inspect == NULL) needs only 2 extra slots and rolls back atomically. */
+    mm_actions min_reg;
+    mm_pipe_inspect_actions min_ins;
+    const mm_action *min_slots[4];
+    CHECK(mm_actions_init(&min_reg, min_slots, 3));
+    CHECK(!mm_pipe_inspect_register(&min_reg, &min_ins, &inspect_pipes_cfg, NULL) && min_reg.count == 2);
+    CHECK(mm_actions_init(&min_reg, min_slots, 4));
+    CHECK(mm_pipe_inspect_register(&min_reg, &min_ins, &inspect_pipes_cfg, NULL) && min_reg.count == 4);
+    CHECK(run(mm_actions_local(&min_reg), "show version") &&
+          !strcmp(message, "MicroMeerschaum " MM_VERSION_STRING " (native)\n"));
+    CHECK(!run(mm_actions_local(&min_reg), "show version extra"));
+    CHECK(!run(mm_actions_local(&min_reg), "show data"));
+    CHECK(run(mm_actions_local(&min_reg), "show connectors") &&
+          !strcmp(message, "journal:local\nsql:local\npeer:lab\napi:main\n"));
+    CHECK(run(mm_actions_local(&min_reg), "show connector peer") &&
+          !strcmp(message, "peer:lab\n"));
+    CHECK(run(mm_actions_local(&min_reg), "show connector api") &&
+          !strcmp(message, "api:main\n"));
+    CHECK(run(mm_actions_local(&min_reg), "show connector sql") &&
+          !strcmp(message, "sql:local\n"));
+    CHECK(run(mm_actions_local(&min_reg), "show connector journal") &&
+          !strcmp(message, "journal:local\n"));
+    CHECK(!run(mm_actions_local(&min_reg), "show connectors bogus"));
+    CHECK(!run(mm_actions_local(&min_reg), "show connectors peer extra"));
+
+    /* Partial registration: progress + custom version only (3 extra slots). */
+    mm_actions part_reg;
+    mm_pipe_inspect_actions part_ins;
+    const mm_action *part_slots[5];
+    mm_pipe_inspect_config part_cfg = {
+        .progress = inspect_progress,
+        .version = "MicroMeerschaum 0.2.1 (esp32)"
+    };
+    CHECK(mm_actions_init(&part_reg, part_slots, 5));
+    CHECK(mm_pipe_inspect_register(&part_reg, &part_ins, &inspect_pipes_cfg, &part_cfg) && part_reg.count == 5);
+    CHECK(run(mm_actions_local(&part_reg), "show version") &&
+          !strcmp(message, "MicroMeerschaum 0.2.1 (esp32)\n"));
+    CHECK(run(mm_actions_local(&part_reg), "show progress -i sql:local") &&
+          !strcmp(message, "Pipe('driver', 'daily', 'north', instance='sql:local')  "
+                           "prefix=5 high=5 confirmed=2 missed=0\n"));
+    CHECK(!run(mm_actions_local(&part_reg), "show data"));
+    CHECK(!run(mm_actions_local(&part_reg), "show columns"));
+    CHECK(!run(mm_actions_local(&part_reg), "show rowcounts"));
+
+    /* Full inspection registration alongside standard pipe actions (2 + 3 + 6 = 11 slots). */
+    mm_actions full_reg;
+    mm_pipe_actions full_pipes;
+    mm_pipe_inspect_actions full_ins;
+    const mm_action *full_slots[11];
+    mm_pipe_inspect_config bad_ver = {.version = "bad\nver"};
+    mm_pipe_inspect_config full_cfg = {
+        .data = inspect_data,
+        .columns = inspect_columns,
+        .rowcount = inspect_rowcount,
+        .progress = inspect_progress,
+        .version = "MicroMeerschaum 0.2.1 (host)"
+    };
+    CHECK(mm_actions_init(&full_reg, full_slots, 10));
+    CHECK(mm_pipe_actions_register(&full_reg, &full_pipes, &inspect_pipes_cfg));
+    CHECK(!mm_pipe_inspect_register(&full_reg, &full_ins, &inspect_pipes_cfg, &full_cfg) &&
+          full_reg.count == 5);
+    CHECK(mm_actions_init(&full_reg, full_slots, 11));
+    CHECK(mm_pipe_actions_register(&full_reg, &full_pipes, &inspect_pipes_cfg));
+    CHECK(!mm_pipe_inspect_register(&full_reg, &full_ins, &inspect_pipes_cfg, &bad_ver) &&
+          full_reg.count == 5);
+    CHECK(mm_pipe_inspect_register(&full_reg, &full_ins, &inspect_pipes_cfg, &full_cfg) &&
+          full_reg.count == 11);
+    CHECK(!mm_pipe_inspect_register(&full_reg, &full_ins, &inspect_pipes_cfg, &full_cfg) &&
+          full_reg.count == 11);
+
+    mm_action_view flocal = mm_actions_local(&full_reg);
+    CHECK(run(flocal, "help show datum") && strstr(message, "show data (show datum)"));
+    CHECK(run(flocal, "help show column") && strstr(message, "show columns (show column)"));
+    CHECK(run(flocal, "help show rowcount") && strstr(message, "show rowcounts (show rowcount)"));
+    CHECK(run(flocal, "help show connector") && strstr(message, "show connectors (show connector)"));
+    CHECK(run(flocal, "help show progress") && strstr(message, "show progress"));
+    CHECK(run(flocal, "help show version") && strstr(message, "show version"));
+
+    /* show data / show datum: selectors, --limit, --begin, --end, bounds, rejections. */
+    CHECK(run(flocal, "show data -i journal:local --limit 2") &&
+          !strcmp(message, "Pipe('plugin:sample', 'daily')\n  {tick: 12}\n  {tick: 12}\n") &&
+          journal_state.last_limit == 2);
+    CHECK(run(flocal, "show datum -l [None] --limit 0") &&
+          !strcmp(message, "Pipe('plugin:sample', 'daily')\n  (no rows)\n") &&
+          journal_state.last_limit == 0);
+    CHECK(!run(flocal, "show data -i journal:local --begin 1") &&
+          strstr(message, "do not support --begin or --end"));
+    CHECK(run(flocal, "show datum -i sql:local --limit 5 --begin -10 --end 2026-01-02T00:00:00Z") &&
+          strstr(message, "Pipe('driver', 'daily', 'north', instance='sql:local')\n") &&
+          strstr(message, "sql limit=5 begin=-10 end=2026-01-02T00:00:00Z") &&
+          !strcmp(sql_state.last_begin, "-10") &&
+          !strcmp(sql_state.last_end, "2026-01-02T00:00:00Z"));
+    CHECK(run(flocal, "show data -c missing") && strstr(message, "No matching"));
+    CHECK(!run(flocal, "show data --limit 129"));
+    CHECK(!run(flocal, "show data --limit -1"));
+    CHECK(!run(flocal, "show data --limit abc"));
+    CHECK(!run(flocal, "show data --limit 1 --limit 2"));
+    CHECK(!run(flocal, "show data --begin"));
+    CHECK(!run(flocal, "show data --begin -c sensor"));
+    CHECK(!run(flocal, "show data --begin 1 --begin 2"));
+    CHECK(!run(flocal, "show data --end"));
+    CHECK(!run(flocal, "show data --end 1 --end 2"));
+    CHECK(!run(flocal, "show data --unknown 1"));
+
+    /* show columns / show column, show rowcounts / show rowcount, show progress. */
+    CHECK(run(flocal, "show columns") &&
+          strstr(message, "Pipe('plugin:sample', 'daily')\n  (no fixed schema; journal pipe)\n") &&
+          strstr(message, "Pipe('driver', 'daily', 'north', instance='sql:local')\n  tick: int [axis]\n  station: string [key]\n  celsius: float\n"));
+    CHECK(run(flocal, "show column -i _journal:local") &&
+          !strstr(message, "journal pipe") && strstr(message, "tick: int [axis]"));
+    CHECK(run(flocal, "show rowcounts") &&
+          strstr(message, "Pipe('plugin:sample', 'daily')  4\n") &&
+          strstr(message, "Pipe('driver', 'daily', 'north', instance='sql:local')  3\n"));
+    CHECK(run(flocal, "show rowcount -l _[None]") &&
+          !strcmp(message, "Pipe('driver', 'daily', 'north', instance='sql:local')  3\n"));
+    CHECK(run(flocal, "show progress -i journal:local") &&
+          !strcmp(message, "Pipe('plugin:sample', 'daily')  prefix=4 high=4 confirmed=3 missed=0\n"));
+    sql_state.fail_inspect = true;
+    CHECK(!run(flocal, "show rowcounts -i sql:local") && strstr(message, "rowcount unavailable"));
+    CHECK(!run(flocal, "show progress -i sql:local") && strstr(message, "progress unavailable"));
+    sql_state.fail_inspect = false;
+
+    /* Remote inspection authorization: action allowlist, hidden pipe non-disclosure, and read gating. */
+    mm_action_view ver_only = mm_actions_remote(&full_reg, allow_only_version, NULL);
+    CHECK(run(ver_only, "show version") && !strcmp(message, "MicroMeerschaum 0.2.1 (host)\n"));
+    CHECK(!run(ver_only, "show data") && strstr(message, "Unknown action"));
+    CHECK(!run(ver_only, "show datum") && strstr(message, "Unknown action"));
+    CHECK(!run(ver_only, "show columns") && strstr(message, "Unknown action"));
+    CHECK(!run(ver_only, "show rowcounts") && strstr(message, "Unknown action"));
+    CHECK(!run(ver_only, "show progress") && strstr(message, "Unknown action"));
+    CHECK(!run(ver_only, "show connectors") && strstr(message, "Unknown action"));
+
+    permission rperm = {.list_push = false, .sync = false, .copy = false, .read = false};
+    mm_action_view fremote = mm_actions_remote(&full_reg, allow_action, &rperm);
+    /* Hidden sql:local pipe is never disclosed in show connectors or inspection queries. */
+    CHECK(run(fremote, "show connectors") &&
+          !strcmp(message, "journal:local\npeer:lab\napi:main\n") &&
+          !strstr(message, "sql:local"));
+    CHECK(run(fremote, "show connectors sql") && strstr(message, "No matching connectors"));
+    CHECK(run(fremote, "show data -i sql:local") && strstr(message, "No matching Pipes"));
+    unsigned before_calls = journal_state.data_calls;
+    /* Exposed journal pipe is denied until read permission is granted, with zero callback calls. */
+    CHECK(!run(fremote, "show data") && strstr(message, "denied") &&
+          journal_state.data_calls == before_calls);
+    CHECK(!run(fremote, "show columns") && strstr(message, "denied"));
+    CHECK(!run(fremote, "show rowcounts") && strstr(message, "denied"));
+    CHECK(!run(fremote, "show progress") && strstr(message, "denied"));
+
+    rperm.read = true;
+    CHECK(run(fremote, "show data --limit 1") &&
+          !strcmp(message, "Pipe('plugin:sample', 'daily')\n  {tick: 12}\n") &&
+          journal_state.data_calls == before_calls + 1);
+    CHECK(run(fremote, "show columns") &&
+          !strcmp(message, "Pipe('plugin:sample', 'daily')\n  (no fixed schema; journal pipe)\n"));
+    CHECK(run(fremote, "show rowcounts") &&
+          !strcmp(message, "Pipe('plugin:sample', 'daily')  4\n"));
+    CHECK(run(fremote, "show progress") &&
+          !strcmp(message, "Pipe('plugin:sample', 'daily')  prefix=4 high=4 confirmed=3 missed=0\n"));
+
     mm_journal_close(peer);
     mm_journal_close(origin);
     mm_journal_close(origin2);

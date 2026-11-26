@@ -276,3 +276,100 @@ assert rpc("read", key=key, limit=2, begin={"$us": 1}, end={"$us": 3},
 assert not rpc("read", key=key, limit=2, params={"bad": 1})["ok"]
 rows.close()
 print("remote SQLite catalog, typed time queries, keyed corrections and filter failures")
+
+# Built-in inspection actions on sql:local pipes (int & datetime axes, local & remote).
+from micromeerschaum import Timestamp
+
+insp_reg = ActionRegistry()
+int_p = provision("sensor", "sql_int", sys.argv[1] + "/insp-int.db", 1, 21, 2, instance="sql:local",
+                  columns=(("tick", "int", False), ("station", "string", True), ("celsius", "float", False)),
+                  axis="tick", create=True)
+dt_p = provision("sensor", "sql_dt", sys.argv[1] + "/insp-dt.db", 1, 22, 2, instance="sql:local",
+                 columns={"datetime": "ts", "id": "station"},
+                 dtypes={"ts": "datetime", "station": "string", "val": "int"},
+                 autotime=True, create=True)
+nr_p = provision("sensor", "sql_nr", sys.argv[1] + "/insp-nr.db", 1, 23, 2, instance="sql:local",
+                 columns=(("tick", "int", False),), axis="tick", create=True)
+hid_p = provision("sensor", "sql_hid", sys.argv[1] + "/insp-hid.db", 1, 24, 2, instance="sql:local",
+                  columns=(("tick", "int", False),), axis="tick", create=True)
+j_p = provision("sensor", "sql_mix_j", sys.argv[1] + "/insp-mix.mm", 1, 25, 2, create=True)
+
+assert int_p.sync([{"tick": -5, "station": "A", "celsius": 10.0},
+                   {"tick": 1, "station": "A", "celsius": 20.0},
+                   {"tick": 2, "station": "B", "celsius": 25.0}])[0]
+assert int_p.sync({"tick": 1, "station": "A", "celsius": 21.5})[0]  # update row; logical=3, high=4
+t1 = 1767312000000000  # 2026-01-02T00:00:00Z
+t2 = 1767398400500000  # 2026-01-03T00:00:00.5Z
+assert dt_p.sync([{"ts": Timestamp(t1), "station": "S1", "val": 7},
+                  {"ts": Timestamp(t2), "station": "S2", "val": 8}])[0]
+assert nr_p.sync({"tick": 1})[0]
+assert hid_p.sync({"tick": 1})[0]
+assert j_p.sync({"tick": 1})[0]
+
+insp_reg.expose(int_p, read=True, write=True)
+insp_reg.expose(dt_p, read=True, write=True)
+insp_reg.expose(nr_p, read=False, write=False)
+insp_reg.expose(j_p, read=True, write=True)
+
+# show columns / show column
+ok, out = insp_reg.dispatch("show columns -m sql_int")
+assert ok and out == (
+    "Pipe('sensor', 'sql_int', instance='sql:local')\n"
+    "  tick: int [axis]\n"
+    "  station: string [key]\n"
+    "  celsius: float"
+), out
+ok, out = insp_reg.dispatch("show column -m sql_dt")
+assert ok and "ts: datetime [axis] (autotime)" in out and "station: string [key]" in out and "val: int" in out, out
+
+# show rowcounts / show progress
+ok, out = insp_reg.dispatch("show rowcounts -m sql_int")
+assert ok and out == "Pipe('sensor', 'sql_int', instance='sql:local')  3", out
+ok, out = insp_reg.dispatch("show progress -m sql_int")
+assert ok and out == "Pipe('sensor', 'sql_int', instance='sql:local')  prefix=4 high=4 confirmed=0 missed=0", out
+
+# show data / show datum with --limit, --begin, --end on int axis (incl. negative bound) and datetime axis (int us & ISO-8601)
+ok, out = insp_reg.dispatch("show data -m sql_int --begin -5 --end 2")
+assert ok and "'tick': -5" in out and "'celsius': 21.5" in out and "'tick': 2" not in out, out
+ok, out = insp_reg.dispatch("show datum -m sql_int --limit 1")
+assert ok and "'tick': -5" in out and "'tick': 1" not in out, out
+ok, out = insp_reg.dispatch("show data -m sql_dt --begin 2026-01-02T00:00:00Z --end 2026-01-03")
+assert ok and ("Timestamp(%d)" % t1) in out and ("Timestamp(%d)" % t2) not in out, out
+ok, out = insp_reg.dispatch("show data -m sql_dt --begin %d --end 2026-01-03T00:00:00.6Z" % (t1 + 1))
+assert ok and ("Timestamp(%d)" % t2) in out and ("Timestamp(%d)" % t1) not in out, out
+assert not insp_reg.dispatch("show data -m sql_int --begin 2026-01-02")[0]
+assert not insp_reg.dispatch("show data -m sql_dt --begin 2023-02-29")[0]
+assert not insp_reg.dispatch("show data -m sql_int sql_mix_j --begin 1")[0]
+
+# show connectors lists sql:local
+ok, out = insp_reg.dispatch("show connector sql")
+assert ok and out == "sql:local", out
+
+# Remote DeviceSession enforces allowlist + read permission + non-disclosure on sql:local
+sql_session = DeviceSession(
+    insp_reg,
+    ("action",),
+    ("show data", "show columns", "show rowcounts", "show progress", "show connectors", "show version"),
+)
+
+
+def sc(line):
+    req = {"v": 1, "id": "sq", "op": "action", "line": line}
+    raw = sql_session.handle(PREFIX + json.dumps(req).encode())
+    assert raw is not None and len(raw) <= 4096
+    return json.loads(raw[len(PREFIX):])
+
+
+assert sc("show columns -m sql_int")["ok"]
+assert sc("show data -m sql_dt --begin 2026-01-02 --limit 1")["ok"]
+assert sc("show rowcounts -m sql_int")["data"] == "Pipe('sensor', 'sql_int', instance='sql:local')  3"
+assert sc("show connectors sql")["data"] == "sql:local"
+assert not sc("show data -m sql_nr")["ok"]
+assert not sc("show columns -m sql_nr")["ok"]
+assert not sc("show rowcounts -m sql_nr")["ok"]
+assert not sc("show progress -m sql_nr")["ok"]
+assert sc("show data -m sql_hid")["data"] == "no matching Pipes"
+
+for pipe in (int_p, dt_p, nr_p, hid_p, j_p):
+    pipe.close()
+print("SQLite built-in inspection actions (show data/columns/rowcounts/progress/connectors)")

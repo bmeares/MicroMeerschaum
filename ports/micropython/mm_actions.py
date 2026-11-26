@@ -3,13 +3,34 @@
 
 _PROMPT = "[ journal:local ] > "
 MAX_LINE = 4224
+_DATA_DEFAULT_LIMIT = 10
+_DATA_MAX_LIMIT = 128
+_DATA_REPLY_LIMIT = 3500
+_CONNECTOR_TYPES = ("journal", "sql", "peer", "api")
+_DAYS_IN_MONTH = (0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
 _FLAGS = {"-c": 0, "-m": 1, "-l": 2, "-i": 3}
 _ALIASES = {"--connector-keys": "-c", "--metric-keys": "-m", "--location-keys": "-l",
             "--mrsm-instance": "-i", "--instance": "-i", "--target-instance": "-I"}
-_BUILTINS = ("help", "show actions", "show pipes", "sync pipes", "copy pipes")
+_BUILTINS = (
+    "help",
+    "show actions",
+    "show pipes",
+    "show data",
+    "show columns",
+    "show rowcounts",
+    "show progress",
+    "show connectors",
+    "show version",
+    "sync pipes",
+    "copy pipes",
+)
 _BUILTIN_ALIASES = {
     "show actions": "show action",
     "show pipes": "show pipe",
+    "show data": "show datum",
+    "show columns": "show column",
+    "show rowcounts": "show rowcount",
+    "show connectors": "show connector",
     "sync pipes": "sync pipe",
     "copy pipes": "copy pipe",
 }
@@ -17,6 +38,12 @@ _BUILTIN_HELP = {
     "help": "help [ACTION]",
     "show actions": "List available actions.",
     "show pipes": "List matching configured Pipes.",
+    "show data": "show data [-c CONNECTOR] [-m METRIC] [-l LOCATION] [-i INSTANCE] [--limit N] [--begin VAL] [--end VAL]",
+    "show columns": "Show declared columns and types for matching Pipes.",
+    "show rowcounts": "Show local row counts for matching Pipes.",
+    "show progress": "Show delivery cursor state for matching Pipes.",
+    "show connectors": "List active local storage instances and provisioned destinations.",
+    "show version": "Show MicroMeerschaum version and runtime.",
     "sync pipes": "Fetch and commit rows from matching source Pipes.",
     "copy pipes": "copy pipes [-I] DESTINATION [-c CONNECTOR] [-m METRIC] [-l LOCATION] [-i INSTANCE]",
 }
@@ -66,8 +93,111 @@ def _is_destination(word):
     return word.startswith(("api:", "peer:")) and bool(word.split(":", 1)[1])
 
 
-def _selection(words, copy):
+def _digits(text, length=None):
+    if not text or (length is not None and len(text) != length):
+        return False
+    for c in text:
+        if not ("0" <= c <= "9"):
+            return False
+    return True
+
+
+def _is_bound_token(word):
+    if not word:
+        return False
+    if word.startswith("-"):
+        return len(word) >= 2 and "0" <= word[1] <= "9"
+    return True
+
+
+def _parse_int_str(text):
+    if not text:
+        raise ValueError("expected an integer bound")
+    body = text[1:] if text[0] in ("+", "-") else text
+    if not _digits(body):
+        raise ValueError("invalid integer bound " + text)
+    value = int(text)
+    if value < -(1 << 63) or value > (1 << 63) - 1:
+        raise ValueError("integer bound out of range")
+    return value
+
+
+def _parse_iso_us(text):
+    s = text
+    if s.endswith("Z") or s.endswith("z"):
+        s = s[:-1]
+    elif s.endswith("+00:00") or s.endswith("-00:00"):
+        s = s[:-6]
+    if len(s) == 10:
+        date_part, time_part = s, None
+    elif len(s) >= 19 and s[10] in ("T", "t", " "):
+        date_part, time_part = s[:10], s[11:]
+    else:
+        raise ValueError("invalid datetime bound " + text)
+    if date_part[4] != "-" or date_part[7] != "-":
+        raise ValueError("invalid datetime bound " + text)
+    ys, ms, ds = date_part[:4], date_part[5:7], date_part[8:10]
+    if not (_digits(ys, 4) and _digits(ms, 2) and _digits(ds, 2)):
+        raise ValueError("invalid datetime bound " + text)
+    year, month, day = int(ys), int(ms), int(ds)
+    if not 1 <= month <= 12:
+        raise ValueError("invalid datetime bound " + text)
+    leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
+    max_day = 29 if month == 2 and leap else _DAYS_IN_MONTH[month]
+    if not 1 <= day <= max_day:
+        raise ValueError("invalid datetime bound " + text)
+    hour = minute = second = usec = 0
+    if time_part is not None:
+        if "." in time_part:
+            hms, frac = time_part.split(".", 1)
+            if not _digits(frac) or len(frac) > 6:
+                raise ValueError("invalid datetime bound " + text)
+            usec = int(frac + "0" * (6 - len(frac)))
+        else:
+            hms = time_part
+        if len(hms) != 8 or hms[2] != ":" or hms[5] != ":":
+            raise ValueError("invalid datetime bound " + text)
+        hs, mins, ss = hms[:2], hms[3:5], hms[6:8]
+        if not (_digits(hs, 2) and _digits(mins, 2) and _digits(ss, 2)):
+            raise ValueError("invalid datetime bound " + text)
+        hour, minute, second = int(hs), int(mins), int(ss)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59 and 0 <= second <= 59):
+            raise ValueError("invalid datetime bound " + text)
+    y = year - (1 if month <= 2 else 0)
+    era = y // 400
+    yoe = y - era * 400
+    doy = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    days = era * 146097 + doe - 719468
+    return (((days * 86400) + hour * 3600 + minute * 60 + second) * 1000000) + usec
+
+
+def _parse_bound(raw, axis_dtype):
+    if raw is None:
+        return None
+    if axis_dtype == "int":
+        return _parse_int_str(raw)
+    if axis_dtype == "datetime":
+        from micromeerschaum import Timestamp
+        body = raw[1:] if raw and raw[0] in ("+", "-") else raw
+        if _digits(body):
+            return Timestamp(_parse_int_str(raw))
+        return Timestamp(_parse_iso_us(raw))
+    raise ValueError("unsupported axis dtype " + str(axis_dtype))
+
+
+def _format_doc(row):
+    from micromeerschaum import Timestamp
+    parts = []
+    for k, v in row.items():
+        rendered = ("Timestamp(%d)" % v.us) if isinstance(v, Timestamp) else repr(v)
+        parts.append("%r: %s" % (k, rendered))
+    return "{" + ", ".join(parts) + "}"
+
+
+def _selection(words, copy, data=False):
     selectors, destination = {}, None
+    limit, has_limit, begin, end = _DATA_DEFAULT_LIMIT, False, None, None
     explicit_target = copy and any(_ALIASES.get(w, w) == "-I" for w in words)
     i = 0
     while i < len(words):
@@ -90,6 +220,30 @@ def _selection(words, copy):
                 i += 1
             if not added:
                 raise ValueError("expected at least one value for " + word)
+        elif data and word == "--limit":
+            if has_limit:
+                raise ValueError("duplicate --limit argument")
+            if i == len(words) or not _digits(words[i]):
+                raise ValueError("expected an integer between 0 and %d for --limit" % _DATA_MAX_LIMIT)
+            limit = int(words[i])
+            if not 0 <= limit <= _DATA_MAX_LIMIT:
+                raise ValueError("expected an integer between 0 and %d for --limit" % _DATA_MAX_LIMIT)
+            has_limit = True
+            i += 1
+        elif data and word == "--begin":
+            if begin is not None:
+                raise ValueError("duplicate --begin argument")
+            if i == len(words) or not _is_bound_token(words[i]):
+                raise ValueError("expected a value for --begin")
+            begin = words[i]
+            i += 1
+        elif data and word == "--end":
+            if end is not None:
+                raise ValueError("duplicate --end argument")
+            if i == len(words) or not _is_bound_token(words[i]):
+                raise ValueError("expected a value for --end")
+            end = words[i]
+            i += 1
         elif copy and word == "-I":
             if destination is not None:
                 raise ValueError("conflicting destination argument")
@@ -103,6 +257,8 @@ def _selection(words, copy):
             raise ValueError("unexpected argument " + word)
     if copy and destination is None:
         raise ValueError("copy pipes requires a provisioned destination")
+    if data:
+        return selectors, limit, begin, end
     return selectors, destination
 
 
@@ -360,9 +516,159 @@ class ActionRegistry:
                 return result
             if name in ("help", "show actions"):
                 return self._help_action(name, args, allowed)
+            if name == "show version":
+                return self._show_version(args)
+            if name == "show connectors":
+                return self._show_connectors(args, allowed is not None)
+            if name in ("show data", "show columns", "show rowcounts", "show progress"):
+                return self._inspect_action(name, args, allowed is not None)
             return self._pipe_action(name, args, allowed is not None)
         except Exception as error:
             return False, str(error)
+
+    def _show_version(self, args):
+        if args:
+            return False, "Usage: show version"
+        import micromeerschaum
+        return True, "MicroMeerschaum %s (MicroPython)" % micromeerschaum.__version__
+
+    def _show_connectors(self, args, remote):
+        import micromeerschaum
+        filt = None
+        if len(args) > 1:
+            raise ValueError("unexpected argument " + args[1])
+        if len(args) == 1:
+            if args[0] not in _CONNECTOR_TYPES:
+                raise ValueError("unexpected argument " + args[0])
+            filt = args[0] + ":"
+        found = set()
+        for entry in self.entries():
+            found.add(entry.pipe.instance_keys)
+        if not remote:
+            for reg in micromeerschaum._stores.values():
+                found.add(reg.keys[3])
+        for peer in micromeerschaum._peers:
+            found.add(peer)
+        items = sorted(c for c in found if filt is None or c.startswith(filt))
+        return True, "\n".join(items) or "no matching connectors"
+
+    def _inspect_action(self, name, args, remote):
+        if name == "show data":
+            selectors, limit, begin_raw, end_raw = _selection(args, False, data=True)
+        else:
+            selectors, _ = _selection(args, False)
+            limit = begin_raw = end_raw = None
+        selected = [e for e in self.entries() if e.matches(selectors)]
+        if not selected:
+            return True, "no matching Pipes"
+        if remote and any(not e.read for e in selected):
+            return False, "Pipe access denied"
+        if name == "show data":
+            return self._show_data(selected, limit, begin_raw, end_raw)
+        if name == "show columns":
+            return self._show_columns(selected)
+        if name == "show rowcounts":
+            lines = ["%s  %d" % (e.label(), e.pipe.get_rowcount()) for e in selected]
+            return True, "\n".join(lines)
+        lines = []
+        for e in selected:
+            state = e.pipe.progress()
+            lines.append(
+                "%s  prefix=%d high=%d confirmed=%d missed=%d" % (
+                    e.label(), state["prefix"], state["high"], state["confirmed"], state["missed"]
+                )
+            )
+        return True, "\n".join(lines)
+
+    def _show_columns(self, selected):
+        lines = []
+        for entry in selected:
+            lines.append(entry.label())
+            if entry.pipe.instance_keys != "sql:local":
+                lines.append("  (no fixed schema; journal pipe)")
+                continue
+            axis, cols, autotime = entry.pipe._config().store.definition()
+            for col_name, dtype_name, is_key in cols:
+                if col_name == axis:
+                    role = " [axis] (autotime)" if autotime else " [axis]"
+                elif is_key:
+                    role = " [key]"
+                else:
+                    role = ""
+                lines.append("  %s: %s%s" % (col_name, dtype_name, role))
+        return True, "\n".join(lines)
+
+    def _show_data(self, selected, limit, begin_raw, end_raw):
+        parsed = []
+        for entry in selected:
+            pipe = entry.pipe
+            if pipe.instance_keys == "sql:local":
+                axis, cols, _ = pipe._config().store.definition()
+                axis_dtype = None
+                for col_name, dtype_name, _ in cols:
+                    if col_name == axis:
+                        axis_dtype = dtype_name
+                        break
+                parsed.append((entry, _parse_bound(begin_raw, axis_dtype), _parse_bound(end_raw, axis_dtype)))
+            else:
+                if begin_raw is not None or end_raw is not None:
+                    raise ValueError("journal pipes do not support --begin or --end")
+                parsed.append((entry, None, None))
+        lines = []
+        total = 0
+        trunc_line = "  ... (truncated)"
+        trunc_reserve = len(trunc_line) + 1
+        truncated = False
+
+        def add_line(line):
+            nonlocal total
+            size = len(line.encode()) + (1 if lines else 0)
+            if total + size + trunc_reserve > _DATA_REPLY_LIMIT:
+                return False
+            lines.append(line)
+            total += size
+            return True
+
+        for entry, begin_val, end_val in parsed:
+            if not add_line(entry.label()):
+                truncated = True
+                break
+            pipe = entry.pipe
+            emitted = 0
+            if pipe.instance_keys == "sql:local":
+                try:
+                    rows = pipe._config().store.docs(begin_val, end_val, None, limit, _DATA_REPLY_LIMIT * 2)
+                except ValueError as err:
+                    if "budget" in str(err):
+                        truncated = True
+                        break
+                    raise
+                for row in rows:
+                    if not add_line("  " + _format_doc(row)):
+                        truncated = True
+                        break
+                    emitted += 1
+            else:
+                try:
+                    for row in pipe._retained_docs(limit, _DATA_REPLY_LIMIT + 64 * 16 + 32):
+                        if not add_line("  " + _format_doc(row)):
+                            truncated = True
+                            break
+                        emitted += 1
+                except OSError as err:
+                    if "too_small" in str(err):
+                        truncated = True
+                    else:
+                        raise
+            if truncated:
+                break
+            if not emitted:
+                if not add_line("  (no rows)"):
+                    truncated = True
+                    break
+        if truncated:
+            lines.append(trunc_line)
+        return True, "\n".join(lines)
 
     def _pipe_action(self, name, args, remote):
         selectors, destination = _selection(args, name == "copy pipes")
