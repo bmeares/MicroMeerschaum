@@ -123,45 +123,256 @@ def command(*argv, ok=True):
     return report
 
 
-def shell():
+def _open_shell_pty(extra_env=None, cols=80, rows=24):
+    import fcntl
+    import struct
+    import termios
+
     master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.Popen(
         ["mrsm", "micro", "shell", "-i", "micro:bench"],
         stdin=slave,
         stdout=slave,
         stderr=slave,
+        env=env,
     )
     os.close(slave)
     transcript = b""
+    full_output = bytearray()
+
+    def read_chunk(deadline):
+        ready = select.select([master], [], [], max(0, deadline - time.monotonic()))[0]
+        assert ready, (bytes(full_output), transcript)
+        chunk = os.read(master, 8192)
+        if b"\x1b[6n" in chunk:
+            os.write(master, b"\x1b[1;1R")
+        full_output.extend(chunk)
+        return chunk
 
     def until(expected):
         nonlocal transcript
         end = time.monotonic() + 12
         while expected not in transcript:
-            ready = select.select([master], [], [], max(0, end - time.monotonic()))[0]
-            assert ready, transcript
-            chunk = os.read(master, 8192)
-            if b"\x1b[6n" in chunk:
-                os.write(master, b"\x1b[1;1R")
-            transcript += chunk
-        transcript = transcript.split(expected, 1)[1]
+            transcript += read_chunk(end)
+        before, transcript = transcript.split(expected, 1)
+        return before + expected
 
+    def wait_prompt():
+        # Wait through the prompt and the end of Reedline's paint frame (including toolbar).
+        until(b"micro:bench")
+        return until(b"\x1b[?25h")
+
+    def drain_exit():
+        end = time.monotonic() + 12
+        while proc.poll() is None and time.monotonic() < end:
+            if select.select([master], [], [], 0.05)[0]:
+                try:
+                    chunk = os.read(master, 8192)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                full_output.extend(chunk)
+        assert proc.wait(12) == 0, bytes(full_output)
+        while select.select([master], [], [], 0.1)[0]:
+            try:
+                chunk = os.read(master, 8192)
+            except OSError:
+                break
+            if not chunk:
+                break
+            full_output.extend(chunk)
+        return bytes(full_output)
+
+    return master, proc, until, wait_prompt, drain_exit, full_output
+
+
+def shell(device):
+    # 1. Interactive styled TTY session: banner, styled prompt, toolbar, icons, conveniences,
+    #    history persistence, and clean close message.
+    before_actions = list(device.actions)
+    master, proc, until, wait_prompt, drain_exit, _ = _open_shell_pty()
     try:
-        until(b"micro:bench")
+        frame = wait_prompt()
+        assert b"serial" in frame and b"disconnected" in frame, frame
         os.write(master, b"abandon\x03")
-        until(b"micro:bench")
+        wait_prompt()
         os.write(master, b"sh\t")
         until(b"show pipes")
         os.write(master, b"\r")
         until(b"Ran show pipes")
-        until(b"micro:bench")
+        frame = wait_prompt()
+        assert b"serial" in frame and b"connected" in frame, frame
+
+        # Failure reply uses styled failure icon.
+        os.write(master, b"refuse\r")
+        until(b"Device refused this action")
+        wait_prompt()
+
+        # Local conveniences: clear, ?, <prefix>?, --help, leading mrsm stripping.
+        os.write(master, b"clear\r")
+        until(b"\x1b[2J\x1b[H")
+        wait_prompt()
+
+        os.write(master, b"?\r")
+        until(b"show pipes")
+        until(b"help")
+        wait_prompt()
+
+        os.write(master, b"sh?\r")
+        until(b"show pipes")
+        wait_prompt()
+
+        os.write(master, b"show pipes --help\r")
+        until(b"Ran help show pipes")
+        wait_prompt()
+
+        os.write(master, b"--help\r")
+        until(b"Ran help")
+        wait_prompt()
+
+        os.write(master, b"mrsm show pipes\r")
+        until(b"Ran show pipes")
+        wait_prompt()
+
         os.write(master, b"quit\r")
-        assert proc.wait(12) == 0
+        output = drain_exit()
     finally:
         if proc.poll() is None:
             proc.kill()
             proc.wait()
         os.close(master)
+
+    assert b"MicroMeerschaum" in output, output
+    assert b"\x1b[1;94m" in output, output  # intro style (bold bright_blue)
+    assert b"\x1b[32m" in output and b"\x1b[36mmicro:bench\x1b[0m" in output, output
+    assert b"\x1b[1;92m" in output and "\U0001f389".encode() in output, output
+    assert b"\x1b[1;31m" in output and "\U0001f4a2".encode() in output, output
+    assert b"\x1b[94m" in output and b"Thank you for using" in output, output
+    assert b"Device shell closed." not in output, output
+
+    # Confirm local commands (clear, ?, sh?) were not sent as device actions.
+    assert device.actions[len(before_actions) :] == [
+        "show pipes",
+        "refuse",
+        "help show pipes",
+        "help",
+        "show pipes",
+    ], device.actions[len(before_actions) :]
+
+    # Verify history persisted under XDG_STATE_HOME/micromeerschaum/shell_history.
+    history_file = Path(os.environ["XDG_STATE_HOME"]) / "micromeerschaum" / "shell_history"
+    assert history_file.is_file(), history_file
+    history_lines = history_file.read_text().splitlines()
+    assert "mrsm show pipes" in history_lines and "show pipes --help" in history_lines, history_lines
+
+    # 2. Second PTY session: recall persistent history via Up arrow & Ctrl-R, exit via Ctrl-D.
+    before_second = len(device.actions)
+    master, proc, until, wait_prompt, drain_exit, _ = _open_shell_pty()
+    try:
+        wait_prompt()
+        # Up twice skips "quit" and recalls "mrsm show pipes".
+        os.write(master, b"\x1b[A\x1b[A")
+        until(b"mrsm show pipes")
+        os.write(master, b"\r")
+        until(b"Ran show pipes")
+        wait_prompt()
+        # Ctrl-R searches persistent history for "--help" -> "show pipes --help".
+        os.write(master, b"\x12show pipes --h")
+        until(b"show pipes --help")
+        # First Enter exits reverse-search with the match in the buffer; second Enter executes it.
+        os.write(master, b"\r")
+        until(b"\x1b[?25h")
+        os.write(master, b"\r")
+        until(b"Ran help show pipes")
+        wait_prompt()
+        # Clean exit via Ctrl-D prints the close message.
+        os.write(master, b"\x04")
+        output2 = drain_exit()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        os.close(master)
+
+    assert b"Thank you for using" in output2, output2
+    assert device.actions[before_second:] == ["show pipes", "help show pipes"], device.actions[
+        before_second:
+    ]
+
+    # 3. Interactive TTY with NO_COLOR=1 and narrow terminal: no SGR color escapes.
+    master, proc, until, wait_prompt, drain_exit, _ = _open_shell_pty(
+        extra_env={"NO_COLOR": "1"}, cols=44, rows=24
+    )
+    try:
+        wait_prompt()
+        os.write(master, b"show pipes\r")
+        until(b"Ran show pipes")
+        wait_prompt()
+        os.write(master, b"exit\r")
+        nocolor_output = drain_exit()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        os.close(master)
+
+    assert b"MicroMeerschaum" in nocolor_output, nocolor_output
+    assert b"(no userna\xe2\x80\xa6@micro:bench" in nocolor_output, nocolor_output
+    assert b"Thank you for using" in nocolor_output, nocolor_output
+    # Zero ANSI style/color SGR codes (Reedline only emits bare \x1b[0m resets before hiding cursor).
+    assert re.search(rb"\x1b\[(?:[1-9][0-9;]*|0;[0-9;]+)m", nocolor_output) is None, nocolor_output
+
+    # 3b. Interactive TTY with formatting.ansi=false & formatting.unicode=false (ASCII mode).
+    ascii_cfg = json.loads(os.environ["MRSM_CONFIG"])
+    ascii_cfg["formatting"] = {"ansi": False, "unicode": False}
+    master, proc, until, wait_prompt, drain_exit, _ = _open_shell_pty(
+        extra_env={"MRSM_CONFIG": json.dumps(ascii_cfg)}, cols=80, rows=24
+    )
+    try:
+        frame = wait_prompt()
+        assert b" ] > " in frame and b"serial" in frame and b"disconnected" in frame, frame
+        os.write(master, b"show pipes\r")
+        until(b" + Ran show pipes")
+        wait_prompt()
+        os.write(master, b"exit\r")
+        ascii_output = drain_exit()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        os.close(master)
+
+    assert b"MicroMeerschaum" in ascii_output and b"Thank you for using" in ascii_output, ascii_output
+    assert re.search(rb"\x1b\[(?:[1-9][0-9;]*|0;[0-9;]+)m", ascii_output) is None, ascii_output
+
+    # 4. Piped (non-TTY) session: plain output, no banner, no close message, no toolbar, no ANSI.
+    piped_before = len(device.actions)
+    piped = subprocess.run(
+        ["mrsm", "micro", "shell", "-i", "micro:bench"],
+        cwd=os.environ["MRSM_ROOT_DIR"],
+        input="show pipes\nclear\nsh?\nshow pipes --help\nmrsm show pipes\nexit\n",
+        capture_output=True,
+        text=True,
+        timeout=40,
+    )
+    assert piped.returncode == 0, (piped.stdout, piped.stderr)
+    assert piped.stdout == "Ran show pipes\nshow pipes\nRan help show pipes\nRan show pipes\n", (
+        piped.stdout,
+        piped.stderr,
+    )
+    assert piped.stderr == "", piped.stderr
+    assert "\x1b" not in piped.stdout and "\x1b" not in piped.stderr
+    assert "MicroMeerschaum" not in piped.stdout and "Thank you" not in piped.stdout
+    assert device.actions[piped_before:] == [
+        "show pipes",
+        "help show pipes",
+        "show pipes",
+    ], device.actions[piped_before:]
 
 
 def qualify(root, library, transport_python):
@@ -308,13 +519,12 @@ def qualify(root, library, transport_python):
                 "micro", "action", "disconnect", "-i", "micro:bench", ok=False
             ).lower()
         )
-        shell()
-        assert device.actions == [
+        shell(device)
+        assert device.actions[:4] == [
             "show pipes",
             "show pipes -m readings",
             "refuse",
             "disconnect",
-            "show pipes",
         ], device.actions
         print(
             "Passed native discovery, SQL transfers, bounded reads, permissions, shell, forced retries, concurrent writes and reconciliation."

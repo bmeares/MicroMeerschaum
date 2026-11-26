@@ -440,7 +440,7 @@ pub(crate) fn action(request: &Request, command: &str) -> Result<Reply> {
     }
     if command == "micro_shell" && args.is_empty() {
         crate::device_shell::run(&config, &instance)?;
-        return Ok(Reply::json(json!([true, "Device shell closed."])));
+        return Ok(Reply::json(json!([true, "Success"])));
     }
     if args.is_empty() {
         return Err(error(
