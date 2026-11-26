@@ -4,10 +4,24 @@ import time
 import _mm
 from _mm import Timestamp
 
+__version__ = "0.2.1"
+
 _stores = {}
 _peers = {}
 _local = "journal:local"
 _missing = object()
+
+
+def _resolve(name, values, default=None):
+    chosen = _missing
+    for value in values:
+        if value is None:
+            continue
+        if chosen is _missing:
+            chosen = value
+        elif chosen != value:
+            raise ValueError("conflicting " + name + " arguments")
+    return default if chosen is _missing else chosen
 
 
 def _wire_key(connector, metric, location):
@@ -24,7 +38,8 @@ def _wire_key(connector, metric, location):
 
 
 class _Registration:
-    def __init__(self, store, path, budget, delivery_issuer, boot, retention, custody, segments):
+    def __init__(self, keys, store, path, budget, delivery_issuer, boot, retention, custody, segments):
+        self.keys = keys
         self.store = store
         self.path = path
         self.budget = budget
@@ -76,9 +91,62 @@ def provision(connector, metric, path, origin, generation, destination, location
     else:
         raise ValueError("unknown storage instance")
     issuer = custodian if custodian is not None and not receiver else destination
-    _stores[pipe._id()] = _Registration(store, path, budget, issuer, boot, retention,
-                                        custodian is not None and not receiver, segments)
+    _stores[pipe._id()] = _Registration(
+        (pipe.connector_keys, pipe.metric_key, pipe.location_key, pipe.instance_keys),
+        store, path, budget, issuer, boot, retention,
+        custodian is not None and not receiver, segments)
     return pipe
+
+
+def _match_token(value, token, is_location):
+    if token == "*":
+        return True
+    if is_location:
+        if token is None or token == "[None]":
+            return value is None
+        if token == "None":
+            return value is None or value == "None"
+    return value == token
+
+
+def _matches_filter(value, selector, is_location=False):
+    if selector is None:
+        return True
+    items = selector if isinstance(selector, (list, tuple, set)) else (selector,)
+    includes, excludes = [], []
+    for item in items:
+        if isinstance(item, str) and item.startswith("_"):
+            excludes.append(item[1:])
+        else:
+            includes.append(item)
+    if includes and not any(_match_token(value, token, is_location) for token in includes):
+        return False
+    if excludes and any(_match_token(value, token, is_location) for token in excludes):
+        return False
+    return True
+
+
+def get_pipes(connector_keys=None, metric_keys=None, location_keys=None,
+              instance_keys=None, as_list=False, mrsm_instance=None, instance=None):
+    """Return currently provisioned Pipes as {connector: {metric: {location: Pipe}}} or a list."""
+    inst_filter = _resolve("instance", (instance_keys, mrsm_instance, instance))
+    pipes = []
+    for reg in _stores.values():
+        ck, mk, lk, ik = reg.keys
+        if not (_matches_filter(ck, connector_keys)
+                and _matches_filter(mk, metric_keys)
+                and _matches_filter(lk, location_keys, is_location=True)
+                and _matches_filter(ik, inst_filter)):
+            continue
+        pipes.append(Pipe(ck, mk, lk, instance=ik))
+    if as_list:
+        return pipes
+    nested = {}
+    for pipe in pipes:
+        metrics = nested.setdefault(pipe.connector_keys, {})
+        locations = metrics.setdefault(pipe.metric_key, {})
+        locations[pipe.location_key] = pipe
+    return nested
 
 
 def _rows(frame):
@@ -138,7 +206,15 @@ def _groups(frame, budget):
 
 
 class Pipe:
-    def __init__(self, connector, metric, location=None, instance=_local):
+    def __init__(self, connector=None, metric=None, location=None, instance=None,
+                 connector_keys=None, metric_key=None, location_key=None,
+                 instance_keys=None, mrsm_instance=None):
+        connector = _resolve("connector", (connector, connector_keys))
+        metric = _resolve("metric", (metric, metric_key))
+        location = _resolve("location", (location, location_key))
+        instance = _resolve("instance", (instance, instance_keys, mrsm_instance), _local)
+        if not isinstance(instance, str) or not instance:
+            raise ValueError("invalid Pipe instance")
         self.connector_keys = connector
         self.metric_key = metric
         self.location_key = location
@@ -151,6 +227,25 @@ class Pipe:
         self.uncertain_first = 0
         self.uncertain_count = 0
 
+    def _key_tuple(self):
+        return (self.connector_keys, self.metric_key, self.location_key, self.instance_keys)
+
+    def __repr__(self):
+        parts = [repr(self.connector_keys), repr(self.metric_key)]
+        if self.location_key is not None:
+            parts.append(repr(self.location_key))
+        if self.instance_keys != _local:
+            parts.append("instance=" + repr(self.instance_keys))
+        return "Pipe(" + ", ".join(parts) + ")"
+
+    __str__ = __repr__
+
+    def __eq__(self, other):
+        return isinstance(other, Pipe) and self._key_tuple() == other._key_tuple()
+
+    def __hash__(self):
+        return hash(self._key_tuple())
+
     def _id(self):
         return (_local if _remote(self.instance_keys) else self.instance_keys, self._wire)
 
@@ -160,8 +255,30 @@ class Pipe:
             raise ValueError("Pipe has not been provisioned")
         return config
 
+    def exists(self):
+        return self._id() in _stores
+
     def progress(self):
         return dict(zip(("prefix", "high", "confirmed", "missed"), self._config().store.progress()))
+
+    def show(self):
+        """Print a summary of this Pipe's identity, instance, parameters, and progress."""
+        opened = self.exists()
+        lines = [
+            repr(self),
+            "  instance: " + self.instance_keys,
+            "  exists: " + str(opened),
+            "  parameters: " + repr(self.parameters),
+        ]
+        if opened:
+            state = self.progress()
+            lines.append(
+                "  progress: prefix=%d high=%d confirmed=%d missed=%d" % (
+                    state["prefix"], state["high"], state["confirmed"], state["missed"]
+                )
+            )
+        print("\n".join(lines))
+        return True, "Success"
 
     def close(self):
         store = self._config().store
@@ -189,6 +306,12 @@ class Pipe:
         except Exception as error:
             return False, str(error)
 
+    def fetch(self, **kw):
+        module = self._source()
+        if not self._registered:
+            self._register(module, {})
+        return module.fetch(self, **kw)
+
     def sync(self, df=_missing, **kw):
         self.staged_input = self.confirmed_input = self.uncertain_first = self.uncertain_count = 0
         remote = _remote(self.instance_keys)
@@ -201,10 +324,7 @@ class Pipe:
                 if config.retention != "keep-old":
                     raise ValueError("peer staging requires keep-old retention")
             if df is _missing:
-                module = self._source()
-                if not self._registered:
-                    self._register(module, {})
-                df = module.fetch(self, **kw)
+                df = self.fetch(**kw)
             elif kw:
                 raise ValueError("source arguments require a source fetch")
             groups = _groups(df, config.budget)
@@ -219,8 +339,10 @@ class Pipe:
                 return False, "%s (staged %d, confirmed at peer %d)" % (
                     error, self.staged_input, self.confirmed_input)
             self.confirmed_input = self.staged_input
-            return False, "%s (confirmed %d input rows)" % (error, self.confirmed_input)
-        return True, "committed %d input rows" % self.confirmed_input
+            return False, "%s (confirmed %d input row%s)" % (
+                error, self.confirmed_input, "" if self.confirmed_input == 1 else "s")
+        return True, "committed %d input row%s" % (
+            self.confirmed_input, "" if self.confirmed_input == 1 else "s")
 
     def _sync_remote(self, config, groups):
         delivery_error = None
@@ -352,9 +474,15 @@ class Pipe:
             raise ValueError("journal reads support limit only")
         return list(self._retained_docs(limit, 1 << 20))
 
+    def get_doc(self, begin=None, end=None, params=None):
+        """Read a single document, or None when no matching documents exist."""
+        docs = self.get_docs(begin=begin, end=end, params=params, limit=1)
+        return docs[0] if docs else None
+
     def get_sync_time(self, params=None):
         """Latest matching SQLite axis value, as integer ticks or Unix microseconds."""
         return self._config().store.sync_time(params)
 
 
 from mm_actions import ActionRegistry, default_actions, make_action, expose, unexpose, dispatch, complete, shell
+entry = dispatch

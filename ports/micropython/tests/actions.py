@@ -187,3 +187,93 @@ class BusyQueue:
 queue = BusyQueue()
 assert asyncio.run(ManagementPeripheral._notify(queue, None, b"tail\n"))
 assert queue.fragments == [b"tail\n", b"tail\n"]
+
+# Bare @make_action, explicit help=, __doc__ fallback, and entry alias.
+from micromeerschaum import default_actions, entry
+
+bare_registry = ActionRegistry()
+
+
+@bare_registry.make_action
+def device_label(args):
+    return True, "room monitor"
+
+
+@bare_registry.make_action(help="  Report board status.  ")
+def board_status(args):
+    return True, "ok"
+
+
+@bare_registry.make_action("sensor reset", help="Reset sensor state.")
+def reset_sensor(args):
+    return True, "reset"
+
+
+class DocAction:
+    __name__ = "doc_probe"
+    __doc__ = "\n  Inspect diagnostic probe.\n  Second line ignored.\n"
+
+    def __call__(self, args):
+        return True, "probed"
+
+
+doc_probe = bare_registry.make_action(DocAction())
+assert bare_registry.dispatch("device label") == (True, "room monitor")
+assert bare_registry.dispatch("board status") == (True, "ok")
+assert bare_registry.dispatch("sensor reset") == (True, "reset")
+assert bare_registry.dispatch("doc probe") == (True, "probed")
+assert bare_registry.help_for("device label") is None
+assert bare_registry.help_for("board status") == "Report board status."
+assert bare_registry.help_for("sensor reset") == "Reset sensor state."
+assert bare_registry.help_for("doc probe") == "Inspect diagnostic probe."
+assert bare_registry.help_for("unknown") is None
+
+# Existing help output format stays unchanged (action names only).
+ok, help_out = bare_registry.dispatch("help")
+assert ok and "device label" in help_out and "Report board status." not in help_out, help_out
+
+# Reject invalid/duplicate bare and explicit registrations.
+for bad in (
+    lambda: bare_registry.make_action(lambda args: (True, "x")),
+    lambda: bare_registry.make_action(device_label),
+    lambda: bare_registry.make_action("bad  name"),
+    lambda: bare_registry.make_action("valid name", help=123),
+):
+    try:
+        bad()
+        raise AssertionError("accepted invalid make_action call")
+    except ValueError:
+        pass
+
+
+def _leading_underscore(args):
+    return True, "no"
+
+
+try:
+    bare_registry.make_action(_leading_underscore)
+    raise AssertionError("accepted leading underscore action name")
+except ValueError:
+    pass
+
+
+def show_pipes(args):
+    return True, "collision"
+
+
+try:
+    bare_registry.make_action(show_pipes)
+    raise AssertionError("accepted built-in collision")
+except ValueError:
+    pass
+
+
+@make_action
+def module_bare_ping(args):
+    return True, "bare:" + " ".join(args)
+
+
+assert entry is dispatch
+assert entry("module bare ping ok") == (True, "bare:ok")
+assert default_actions.help_for("module bare ping") is None
+print("bare @make_action, help metadata, docstring fallback, and entry alias")

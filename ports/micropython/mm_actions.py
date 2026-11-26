@@ -100,26 +100,63 @@ class Exposure:
         return " ".join(str(value) for value in self.identity)
 
 
+def _validate_action_name(name):
+    words = _words(name)
+    if (not words or name != " ".join(words) or
+            any(ord(c) > 126 or c in ("'", '"', "\\") for c in name)):
+        raise ValueError("expected a canonical action name")
+    return name
+
+
+def _first_doc_line(text):
+    if not isinstance(text, str):
+        return None
+    for line in text.replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return None
+
+
 class ActionRegistry:
     """Live Pipes and actions for one application. All access is explicit."""
     def __init__(self):
         self._custom = {}
+        self._help = {}
         self._pipes = {}
         self._next_id = 1
 
-    def make_action(self, name):
-        words = _words(name)
-        if (not words or name != " ".join(words) or
-                any(ord(c) > 126 or c in ("'", '"', "\\") for c in name)):
-            raise ValueError("expected a canonical action name")
-        def decorate(function):
-            if name in _BUILTINS or name in self._custom:
-                raise ValueError("action already registered")
+    def make_action(self, name=None, help=None):
+        if help is not None and not isinstance(help, str):
+            raise ValueError("expected a help string")
+
+        def register(action_name, function):
             if not callable(function):
                 raise ValueError("expected an action function")
-            self._custom[name] = function
+            if action_name is None:
+                raw = getattr(function, "__name__", None)
+                if not isinstance(raw, str) or raw == "<lambda>":
+                    raise ValueError("expected a canonical action name")
+                action_name = raw.replace("_", " ")
+            _validate_action_name(action_name)
+            if action_name in _BUILTINS or action_name in self._custom:
+                raise ValueError("action already registered")
+            self._custom[action_name] = function
+            summary = (_first_doc_line(help) if help is not None
+                       else _first_doc_line(getattr(function, "__doc__", None)))
+            if summary:
+                self._help[action_name] = summary
             return function
-        return decorate
+
+        if callable(name):
+            return register(None, name)
+        if name is not None:
+            _validate_action_name(name)
+        return lambda function: register(name, function)
+
+    def help_for(self, name):
+        """Return the stored one-line help text for a registered action, or None."""
+        return self._help.get(name)
 
     def entries(self):
         """Snapshot live exposures in registration order."""

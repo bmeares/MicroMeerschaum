@@ -216,3 +216,159 @@ assert direct.deliver()[0]
 assert target.read_doc(first + 2) == {"tick": 62}
 stage.close()
 target.close()
+
+# Pipe identity, repr/str, equality/hashing, constructor aliases, helpers, grammar, and get_pipes.
+import micromeerschaum as mrsm
+from micromeerschaum import get_pipes
+
+assert mrsm.__version__ == "0.2.1"
+assert mrsm.entry is mrsm.dispatch
+
+p_default = Pipe("sensor", "temperature")
+p_loc = Pipe("sensor", "temperature", "east")
+p_none_str = Pipe("sensor", "temperature", "None")
+p_empty_str = Pipe("sensor", "temperature", "")
+p_sql = Pipe("sensor", "temperature", instance="sql:local")
+p_loc_sql = Pipe("sensor", "temperature", "east", "sql:local")
+p_explicit_local = Pipe("sensor", "temperature", "east", "journal:local")
+
+assert repr(p_default) == str(p_default) == "Pipe('sensor', 'temperature')"
+assert repr(p_loc) == str(p_loc) == "Pipe('sensor', 'temperature', 'east')"
+assert repr(p_none_str) == str(p_none_str) == "Pipe('sensor', 'temperature', 'None')"
+assert repr(p_empty_str) == str(p_empty_str) == "Pipe('sensor', 'temperature', '')"
+assert repr(p_sql) == str(p_sql) == "Pipe('sensor', 'temperature', instance='sql:local')"
+assert repr(p_loc_sql) == str(p_loc_sql) == "Pipe('sensor', 'temperature', 'east', instance='sql:local')"
+assert repr(p_explicit_local) == "Pipe('sensor', 'temperature', 'east')"
+
+# Equality and hashing across exact identity tuples.
+p_alias = Pipe(connector_keys="sensor", metric_key="temperature",
+               location_key="east", mrsm_instance="sql:local")
+p_alias2 = Pipe(connector_keys="sensor", metric_key="temperature",
+                location_key="east", instance_keys="sql:local")
+assert p_loc_sql == p_alias == p_alias2
+assert hash(p_loc_sql) == hash(p_alias) == hash(p_alias2)
+assert len({p_loc_sql, p_alias, p_alias2, p_default, p_loc, p_none_str, p_empty_str, p_sql}) == 6
+lookup = {p_loc_sql: "hit"}
+assert lookup[p_alias] == "hit"
+assert p_default != p_none_str and p_default != p_empty_str and p_default != p_sql
+assert p_default != ("sensor", "temperature", None, "journal:local")
+assert Pipe(connector_keys="sensor", metric_key="temperature", location_key="None").location_key == "None"
+assert Pipe("sensor", "temperature", connector_keys="sensor", metric_key="temperature") == p_default
+
+for bad_kwargs in (
+    {},
+    {"connector": "sensor"},
+    {"metric": "temperature"},
+    {"connector": "sensor", "metric": "temperature", "connector_keys": "other"},
+    {"connector": "sensor", "metric": "temperature", "metric_key": "other"},
+    {"connector": "sensor", "metric": "temperature", "location": "a", "location_key": "b"},
+    {"connector": "sensor", "metric": "temperature", "instance": "sql:local", "mrsm_instance": "journal:local"},
+    {"connector": "sensor", "metric": "temperature", "instance": "sql:local", "instance_keys": "journal:other"},
+    {"connector": "sensor", "metric": "temperature", "instance": ""},
+):
+    try:
+        Pipe(**bad_kwargs)
+        raise AssertionError("accepted invalid Pipe constructor kwargs: %r" % (bad_kwargs,))
+    except ValueError:
+        pass
+
+# exists(), get_doc(), show(), fetch(), and singular/plural sync messages.
+unprov = Pipe("sensor", "parity")
+assert not unprov.exists()
+captured = []
+orig_print = getattr(mrsm, "print", None)
+mrsm.print = lambda *a: captured.append(" ".join(str(x) for x in a))
+try:
+    assert unprov.show() == (True, "Success")
+finally:
+    if orig_print is None:
+        del mrsm.print
+    else:
+        mrsm.print = orig_print
+assert "Pipe('sensor', 'parity')" in captured[-1]
+assert "instance: journal:local" in captured[-1]
+assert "exists: False" in captured[-1]
+
+parity = provision("sensor", "parity", root + "/parity.mm", 1, 31, 2,
+                   segments=4, segment_bytes=512, create=True)
+assert parity.exists() and Pipe("sensor", "parity").exists()
+assert parity.get_doc() is None
+ok, message = parity.sync([])
+assert ok and message == "committed 0 input rows", message
+ok, message = parity.sync({"tick": 1})
+assert ok and message == "committed 1 input row", message
+ok, message = parity.sync({"tick": [2, 3]})
+assert ok and message == "committed 2 input rows", message
+assert parity.get_doc() == {"tick": 1}
+
+# Partial failure with exactly 1 confirmed input row uses singular grammar.
+def one_then_bad():
+    yield {"pad": "x" * 220}
+    yield {"pad": "y" * 220}
+    yield {"bad": [1]}
+
+ok, message = parity.sync(one_then_bad())
+assert not ok and parity.confirmed_input == 1 and "confirmed 1 input row)" in message, message
+
+captured = []
+mrsm.print = lambda *a: captured.append(" ".join(str(x) for x in a))
+try:
+    assert parity.show() == (True, "Success")
+finally:
+    del mrsm.print
+assert "Pipe('sensor', 'parity')" in captured[-1]
+assert "exists: True" in captured[-1]
+assert "progress:" in captured[-1] and "high=4" in captured[-1]
+
+# fetch() runs source registration (if needed) and fetch without committing rows.
+src_pipe = provision("plugin:test_source", "fetch_only", root + "/fetch_only.mm", 1, 32, 2, create=True)
+doc = src_pipe.fetch(tick=10)
+assert doc == {"tick": 10, "unit": "C"} and src_pipe.parameters == {"unit": "C"}
+assert src_pipe.progress()["high"] == 0 and src_pipe.get_doc() is None
+assert src_pipe.register(unit="K")[0]
+assert src_pipe.fetch(tick=11) == {"tick": 11, "unit": "K"}
+assert src_pipe.progress()["high"] == 0
+ok, message = src_pipe.sync(tick=12)
+assert ok and message == "committed 1 input row" and src_pipe.get_doc() == {"tick": 12, "unit": "K"}
+try:
+    parity.fetch()
+    raise AssertionError("fetch succeeded on non-plugin Pipe")
+except ValueError:
+    pass
+
+# get_pipes() nested dict, as_list, exact keys, and scalar/list/negation/None filters.
+loc_east = provision("sensor", "humidity", root + "/hum_east.mm", 1, 33, 2, location="east", create=True)
+loc_none_str = provision("sensor", "parity", root + "/parity_none_str.mm", 1, 34, 2, location="None", create=True)
+other_inst = provision("sensor", "humidity", root + "/hum_rx.mm", 1, 33, 2,
+                       location="east", instance="journal:replica", receiver=True, create=True)
+
+nested = get_pipes(instance_keys="journal:local")
+assert nested["sensor"]["parity"][None] == parity
+assert nested["sensor"]["parity"]["None"] == loc_none_str
+assert nested["sensor"]["humidity"]["east"] == loc_east
+assert nested["plugin:test_source"]["fetch_only"][None] == src_pipe
+
+all_list = get_pipes(as_list=True)
+assert len(all_list) == 5
+assert set(all_list) == {parity, src_pipe, loc_east, loc_none_str, other_inst}
+assert set(get_pipes(connector_keys="sensor", as_list=True)) == {parity, loc_east, loc_none_str, other_inst}
+assert set(get_pipes(connector_keys=["plugin:test_source"], as_list=True)) == {src_pipe}
+assert set(get_pipes(connector_keys="_sensor", as_list=True)) == {src_pipe}
+assert set(get_pipes(metric_keys=("parity", "fetch_only"), as_list=True)) == {parity, loc_none_str, src_pipe}
+assert set(get_pipes(metric_keys="_parity", as_list=True)) == {src_pipe, loc_east, other_inst}
+assert set(get_pipes(location_keys="east", as_list=True)) == {loc_east, other_inst}
+assert set(get_pipes(location_keys=[None], as_list=True)) == {parity, src_pipe}
+assert set(get_pipes(location_keys="[None]", as_list=True)) == {parity, src_pipe}
+assert set(get_pipes(location_keys="None", as_list=True)) == {parity, src_pipe, loc_none_str}
+assert set(get_pipes(location_keys="_None", as_list=True)) == {loc_east, other_inst}
+assert set(get_pipes(location_keys="_[None]", as_list=True)) == {loc_east, loc_none_str, other_inst}
+assert set(get_pipes(location_keys=["east", "_east"], as_list=True)) == set()
+assert set(get_pipes(instance_keys="journal:replica", as_list=True)) == {other_inst}
+assert set(get_pipes(instance_keys="_journal:replica", as_list=True)) == {parity, src_pipe, loc_east, loc_none_str}
+assert get_pipes(mrsm_instance="journal:replica", as_list=True) == [other_inst]
+
+for handle in (parity, src_pipe, loc_east, loc_none_str, other_inst):
+    handle.close()
+assert not parity.exists()
+assert get_pipes() == {} and get_pipes(as_list=True) == []
+print("Pipe parity: repr/eq/hash, aliases, exists/fetch/get_doc/show, grammar, get_pipes")

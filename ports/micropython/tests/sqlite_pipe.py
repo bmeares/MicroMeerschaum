@@ -20,6 +20,9 @@ p.close()
 p = open_rows()
 assert p.get_docs(begin=1, end=2, params={"station": ["A"]}, limit=3) == [
     {"tick": 1, "station": "A", "celsius": 22.0}]
+assert p.get_doc(begin=1, end=2, params={"station": ["A"]}) == {
+    "tick": 1, "station": "A", "celsius": 22.0}
+assert p.get_doc(params={"station": "missing"}) is None
 assert len(p.get_docs()) == 3
 assert p.get_docs(params={"station": None})[0]["celsius"] == 24.0
 assert p.get_sync_time(params={"station": "A"}) == 2
