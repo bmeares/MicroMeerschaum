@@ -333,6 +333,15 @@ def qualify(root, library, db, micropython=None, previous_library=None):
         # Only the new name is configured, and the old library is gone.
         assert set(json.loads(env["MRSM_CONFIG"])["plugins"]) == {"micro"}
     checked_command("mrsm", "micro", "receiver", "init", env=env, cwd=root)
+    if not previous_library:
+        empty_table = checked_command(
+            "mrsm", "micro", "receiver", "status", env=env, cwd=root
+        ).decode()
+        assert "No captured receiver streams." in empty_table, empty_table
+        empty_json = checked_command(
+            "mrsm", "micro", "receiver", "status", "--nopretty", env=env, cwd=root
+        ).decode()
+        assert json.loads(empty_json) == [], empty_json
     with serve(root, env) as post:
         assert post(v1, batch([original]))[0] == 401
         assert post(v1, batch([original]), unscoped)[0] == 403
@@ -448,10 +457,52 @@ def qualify(root, library, db, micropython=None, previous_library=None):
         )
         assert post(v1, batch(), direct) == (200, expected(8))
         assert pipe.get_docs(limit=5) == [{"tick": 1, "value": 77}]
-        status = checked_command(
+        status_table = checked_command(
             "mrsm", "micro", "receiver", "status", env=env, cwd=root
         ).decode()
-        assert '"durable_through":8' in status and '"applied":7' in status, status
+        for expected_fragment in (
+            "Version",
+            "Stream",
+            "Origin",
+            "Generation",
+            "Durable",
+            "Records",
+            "Routes",
+            "Outputs",
+            "Pipe('sensor', 'temperature')",
+            str(ORIGIN),
+            str(GENERATION),
+            "v0",
+            "v1",
+            "Pipe('weather', 'temperature', instance='sql:mmtest'): 7",
+            "Pipe('weather', 'second_output', instance='sql:mmtest'): 7",
+        ):
+            assert expected_fragment in status_table, (expected_fragment, status_table)
+        assert "\x1f" not in status_table, status_table
+        assert '"durable_through"' not in status_table, status_table
+        v1_line = next(
+            (line for line in status_table.splitlines() if " v1 " in f" {line} "),
+            None,
+        )
+        assert v1_line is not None and " 8 " in v1_line, status_table
+        status_json = checked_command(
+            "mrsm", "micro", "receiver", "status", "--nopretty", env=env, cwd=root
+        ).decode()
+        parsed_status = json.loads(status_json)
+        assert isinstance(parsed_status, list) and len(parsed_status) == 2, parsed_status
+        v0_status = next(row for row in parsed_status if row["version"] == 0)
+        v1_status = next(row for row in parsed_status if row["version"] == 1)
+        assert v0_status["durable_through"] == 1 and v0_status["outputs"] == [], v0_status
+        assert v1_status["durable_through"] == 8, v1_status
+        assert v1_status["origin"] == ORIGIN and v1_status["generation"] == GENERATION, v1_status
+        assert v1_status["key"] == KEY.decode(), v1_status
+        applied_by_output = {
+            item["output"]: item["applied"] for item in v1_status["outputs"]
+        }
+        assert applied_by_output == {
+            json.dumps(["sql:mmtest", "weather", "temperature", None], separators=(",", ":")): 7,
+            json.dumps(["sql:mmtest", "weather", "second_output", None], separators=(",", ":")): 7,
+        }, applied_by_output
         if not db:
             raw.close()
 
