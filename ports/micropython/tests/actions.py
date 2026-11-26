@@ -151,6 +151,22 @@ row = {"tick": 9, "t": {"$us": -9}, "flag": True, "label": "north"}
 assert call("write", key=key, rows=[row])["ok"]
 assert p.progress()["high"] == 1 and p.progress()["confirmed"] == 0
 assert call("read", key=key, limit=2)["data"] == [row]
+assert call("read", key=key, limit=2, order="asc")["data"] == [row]
+desc_reply = call("read", key=key, limit=2, order="desc")
+assert not desc_reply["ok"] and "ascending" in desc_reply["error"], desc_reply
+assert not call("read", key=key, limit=2, order="sideways")["ok"]
+assert call("sync_time", key=key) == {"v": 1, "id": "123", "ok": True, "data": None}
+assert call("sync_time", key=key, params={})["data"] is None
+assert not call("sync_time", key=key, params={"tick": 9})["ok"]
+assert call("rowcount", key=key)["data"] == 1
+assert call("rowcount", key=key, params={})["data"] == 1
+assert not call("rowcount", key=key, begin=0)["ok"]
+assert not call("rowcount", key=key, end=10)["ok"]
+assert not call("rowcount", key=key, params={"tick": 9})["ok"]
+assert not call("sync_time", key=["sensor", "unpublished", None])["ok"]
+assert not call("rowcount", key=["sensor", "unpublished", None])["ok"]
+assert json.loads(DeviceSession(registry, ("catalog",)).handle(frame("sync_time", key=key)[:-1])[len(PREFIX):])["error"] == "operation unavailable"
+assert json.loads(DeviceSession(registry, ("catalog",)).handle(frame("rowcount", key=key)[:-1])[len(PREFIX):])["error"] == "operation unavailable"
 assert call("read", key=key, limit=0)["data"] == []
 assert not call("read", key=key, limit=129)["ok"]
 assert not call("read", key=key, limit=1, params={"tick": 9})["ok"]

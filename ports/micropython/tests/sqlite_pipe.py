@@ -266,16 +266,79 @@ def rpc(op, **kw):
     return json.loads(response[len(PREFIX):])
 
 
-assert rpc("catalog")["data"]["items"][0]["filters"] == ["begin", "end", "params"]
+item = rpc("catalog")["data"]["items"][0]
+assert item["filters"] == ["begin", "end", "params"]
+assert item["columns"] == {"datetime": "dt", "station": "station"}
+assert item["dtypes"] == {"dt": "datetime", "station": "string", "value": "int"}
+assert rpc("sync_time", key=key) == {"v": 1, "id": "db", "ok": True, "data": None}
+assert rpc("rowcount", key=key) == {"v": 1, "id": "db", "ok": True, "data": 0}
 data = [{"dt": {"$us": us}, "station": "A", "value": us * 2} for us in range(4)]
 assert rpc("write", key=key, rows=data)["ok"]
 data[1]["value"] = 91
 assert rpc("write", key=key, rows=[data[1]])["ok"]
 assert rpc("read", key=key, limit=2, begin={"$us": 1}, end={"$us": 3},
            params={"station": ["A", "B"]})["data"] == data[1:3]
+assert rpc("read", key=key, limit=2, order="asc")["data"] == data[:2]
+assert rpc("read", key=key, limit=2, order="desc")["data"] == [data[3], data[2]]
+assert rpc("read", key=key, limit=2, begin={"$us": 1}, end={"$us": 3},
+           order="desc")["data"] == [data[2], data[1]]
+assert not rpc("read", key=key, limit=2, order="sideways")["ok"]
+assert not rpc("read", key=key, limit=2, order=None)["ok"]
 assert not rpc("read", key=key, limit=2, params={"bad": 1})["ok"]
-rows.close()
-print("remote SQLite catalog, typed time queries, keyed corrections and filter failures")
+assert rpc("sync_time", key=key)["data"] == {"$us": 3}
+assert rpc("sync_time", key=key, params={"station": "A"})["data"] == {"$us": 3}
+assert rpc("sync_time", key=key, params={"station": "missing"})["data"] is None
+assert not rpc("sync_time", key=key, params={"bad": 1})["ok"]
+assert rpc("rowcount", key=key)["data"] == 4
+assert rpc("rowcount", key=key, begin={"$us": 1}, end={"$us": 3},
+           params={"station": ["A", "B"]})["data"] == 2
+assert not rpc("rowcount", key=key, params={"bad": 1})["ok"]
+
+# Integer-axis sql:local pipe (>128 rows) + permission gating for sync_time and rowcount.
+bulk = provision("sensor", "bulk", sys.argv[1] + "/bulk.db", 1, 10, 2, instance="sql:local",
+                 columns={"datetime": "tick"}, dtypes={"tick": "int", "v": "int"}, create=True)
+assert bulk.sync([{"tick": i, "v": i * 3} for i in range(1, 136)])[0]
+registry.expose(bulk, read=True, write=False)
+write_only = provision("sensor", "writeonly", sys.argv[1] + "/writeonly.db", 1, 11, 2,
+                       instance="sql:local", columns={"datetime": "tick"},
+                       dtypes={"tick": "int"}, create=True)
+registry.expose(write_only, read=False, write=True)
+hidden_sql = provision("sensor", "hidden_sql", sys.argv[1] + "/hidden_sql.db", 1, 12, 2,
+                       instance="sql:local", columns={"datetime": "tick"},
+                       dtypes={"tick": "int"}, create=True)
+
+bulk_key = ["sensor", "bulk", None]
+wo_key = ["sensor", "writeonly", None]
+hidden_key = ["sensor", "hidden_sql", None]
+assert rpc("rowcount", key=bulk_key)["data"] == 135
+assert rpc("rowcount", key=bulk_key, begin=10, end=20)["data"] == 10
+assert rpc("sync_time", key=bulk_key)["data"] == 135
+assert rpc("read", key=bulk_key, limit=2, order="desc")["data"] == [
+    {"tick": 135, "v": 405}, {"tick": 134, "v": 402}]
+for blocked in (wo_key, hidden_key):
+    assert not rpc("sync_time", key=blocked)["ok"]
+    assert not rpc("rowcount", key=blocked)["ok"]
+    assert not rpc("read", key=blocked, limit=1)["ok"]
+
+def rpc_on(sess, op, **kw):
+    req = {"v": 1, "id": "db", "op": op}
+    req.update(kw)
+    response = sess.handle(PREFIX + json.dumps(req).encode())
+    return json.loads(response[len(PREFIX):])
+
+catalog_only = DeviceSession(registry, ("catalog",))
+assert rpc_on(catalog_only, "sync_time", key=bulk_key)["error"] == "operation unavailable"
+assert rpc_on(catalog_only, "rowcount", key=bulk_key)["error"] == "operation unavailable"
+sync_only = DeviceSession(registry, ("catalog", "sync_time"))
+assert rpc_on(sync_only, "sync_time", key=bulk_key)["data"] == 135
+assert rpc_on(sync_only, "rowcount", key=bulk_key)["error"] == "operation unavailable"
+count_only = DeviceSession(registry, ("catalog", "rowcount"))
+assert rpc_on(count_only, "rowcount", key=bulk_key)["data"] == 135
+assert rpc_on(count_only, "sync_time", key=bulk_key)["error"] == "operation unavailable"
+
+for p_open in (rows, bulk, write_only, hidden_sql):
+    p_open.close()
+print("remote SQLite catalog, typed time queries, keyed corrections, rowcount, sync_time, desc reads and filter failures")
 
 # Built-in inspection actions on sql:local pipes (int & datetime axes, local & remote).
 from micromeerschaum import Timestamp

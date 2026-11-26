@@ -110,6 +110,10 @@ struct Entry {
     write: bool,
     #[serde(default)]
     filters: Vec<String>,
+    #[serde(default)]
+    columns: Option<serde_json::Map<String, Value>>,
+    #[serde(default)]
+    dtypes: Option<serde_json::Map<String, Value>>,
 }
 
 impl Entry {
@@ -119,9 +123,30 @@ impl Entry {
         } else {
             json!(["all"])
         };
-        json!({"pipe_id": self.id, "connector_keys":self.key.0, "metric_key":self.key.1,
-            "location_key":self.key.2, "parameters": {"locks":locks,
-            "micro":{"instance":self.instance,"read":self.read,"write":self.write,"filters":self.filters}}})
+        let mut parameters = serde_json::Map::new();
+        if let Some(columns) = self.columns.as_ref().filter(|m| !m.is_empty()) {
+            parameters.insert("columns".into(), Value::Object(columns.clone()));
+        }
+        if let Some(dtypes) = self.dtypes.as_ref().filter(|m| !m.is_empty()) {
+            parameters.insert("dtypes".into(), Value::Object(dtypes.clone()));
+        }
+        parameters.insert("locks".into(), locks);
+        parameters.insert(
+            "micro".into(),
+            json!({
+                "instance": self.instance,
+                "read": self.read,
+                "write": self.write,
+                "filters": self.filters,
+            }),
+        );
+        json!({
+            "pipe_id": self.id,
+            "connector_keys": self.key.0,
+            "metric_key": self.key.1,
+            "location_key": self.key.2,
+            "parameters": Value::Object(parameters),
+        })
     }
 }
 
@@ -239,24 +264,21 @@ fn wire_datetime(s: &str) -> Result<Value> {
     Ok(json!({"$us":us}))
 }
 
-fn read(config: &Value, key: &Key, query: &Value) -> Result<Vec<Value>> {
-    let explicit = query["limit"].as_u64();
-    if (!query["limit"].is_null() && explicit.is_none())
-        || explicit.is_some_and(|n| n > MAX_ROWS as u64)
-    {
-        return Err(error("Device reads accept a limit from 0 to 128 rows."));
-    }
-    if query["order"]
-        .as_str()
-        .is_some_and(|s| !s.eq_ignore_ascii_case("asc"))
-        || query["remote"] == true
-    {
-        return Err(error(
-            "Device reads support local rows in ascending device order.",
-        ));
-    }
-    let limit = explicit.map(|n| n as usize).unwrap_or(MAX_ROWS);
-    let mut request = json!({"op":"read","key":key,"limit":limit});
+fn from_wire_datetime(obj: &serde_json::Map<String, Value>) -> Result<String> {
+    let us = obj
+        .get("$us")
+        .and_then(Value::as_i64)
+        .filter(|_| obj.len() == 1)
+        .and_then(DateTime::<Utc>::from_timestamp_micros)
+        .ok_or_else(|| error("Invalid UTC microseconds in device reply."))?;
+    Ok(us.to_rfc3339_opts(SecondsFormat::Micros, true))
+}
+
+fn is_op_unavailable(err: &Error) -> bool {
+    matches!(err, Error::Message(msg) if msg.eq_ignore_ascii_case("operation unavailable"))
+}
+
+fn attach_bounds(request: &mut Value, query: &Value) -> Result<()> {
     for name in ["begin", "end", "params"] {
         let v = &query[name];
         if !v.is_null() && v.as_object().is_none_or(|m| !m.is_empty()) {
@@ -267,6 +289,82 @@ fn read(config: &Value, key: &Key, query: &Value) -> Result<Vec<Value>> {
             };
         }
     }
+    Ok(())
+}
+
+fn parse_sync_time_reply(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Number(n) if n.is_i64() => Ok(Value::Number(n)),
+        Value::Object(obj) => Ok(Value::String(from_wire_datetime(&obj)?)),
+        _ => Err(error("Invalid device sync_time result.")),
+    }
+}
+
+fn sync_time(config: &Value, key: &Key, context: &Value) -> Result<Value> {
+    if context["newest"].as_bool() == Some(false) {
+        return Ok(Value::Null);
+    }
+    let mut request = json!({"op": "sync_time", "key": key});
+    let params = if !context["params"].is_null() {
+        &context["params"]
+    } else {
+        &context["query"]["params"]
+    };
+    if !params.is_null() && params.as_object().is_none_or(|m| !m.is_empty()) {
+        request["params"] = params.clone();
+    }
+    match exchange(config, request) {
+        Ok(value) => parse_sync_time_reply(value),
+        Err(err) if is_op_unavailable(&err) => Ok(Value::Null),
+        Err(err) => Err(err),
+    }
+}
+
+fn rowcount(config: &Value, key: &Key, query: &Value) -> Result<Value> {
+    if query["remote"] == true {
+        return Err(error("Device rowcount supports local rows only."));
+    }
+    let mut request = json!({"op": "rowcount", "key": key});
+    attach_bounds(&mut request, query)?;
+    match exchange(config, request) {
+        Ok(value) => {
+            let count = value
+                .as_u64()
+                .ok_or_else(|| error("Invalid device rowcount result."))?;
+            Ok(json!(count))
+        }
+        Err(err) if is_op_unavailable(&err) => Ok(json!(read(config, key, query)?.len())),
+        Err(err) => Err(err),
+    }
+}
+
+fn read(config: &Value, key: &Key, query: &Value) -> Result<Vec<Value>> {
+    let explicit = query["limit"].as_u64();
+    if (!query["limit"].is_null() && explicit.is_none())
+        || explicit.is_some_and(|n| n > MAX_ROWS as u64)
+    {
+        return Err(error("Device reads accept a limit from 0 to 128 rows."));
+    }
+    if query["remote"] == true {
+        return Err(error("Device reads support local rows only."));
+    }
+    let desc = match query["order"].as_str() {
+        None if query["order"].is_null() => false,
+        Some(s) if s.eq_ignore_ascii_case("asc") => false,
+        Some(s) if s.eq_ignore_ascii_case("desc") => true,
+        _ => {
+            return Err(error(
+                "Device reads support ascending ('asc') or descending ('desc') order.",
+            ));
+        }
+    };
+    let limit = explicit.map(|n| n as usize).unwrap_or(MAX_ROWS);
+    let mut request = json!({"op": "read", "key": key, "limit": limit});
+    if desc {
+        request["order"] = json!("desc");
+    }
+    attach_bounds(&mut request, query)?;
     let rows = exchange(config, request)?;
     let rows = rows
         .as_array()
@@ -296,12 +394,7 @@ fn frame(rows: Vec<Value>, query: &Value) -> Result<Frame> {
         });
         for (name, v) in doc.iter_mut() {
             if let Some(obj) = v.as_object() {
-                let us = v["$us"]
-                    .as_i64()
-                    .filter(|_| obj.len() == 1)
-                    .and_then(DateTime::<Utc>::from_timestamp_micros)
-                    .ok_or_else(|| error("Invalid UTC microseconds in device reply."))?;
-                *v = json!(us.to_rfc3339_opts(SecondsFormat::Micros, true));
+                *v = json!(from_wire_datetime(obj)?);
                 time_columns.insert(name.clone());
             } else if v.is_array() {
                 return Err(error("Invalid nested device document."));
@@ -383,10 +476,14 @@ pub(crate) fn call(req: &Request, data: Option<Frame>) -> Result<Reply> {
     }
     match method {
         "get_pipe_data" => Ok(Reply::data(Some(frame(read(config, &key, query)?, query)?))),
-        "get_pipe_rowcount" => Ok(Reply::json(json!(read(config, &key, query)?.len()))),
-        // A device does not publish an indexed datetime axis or a fixed schema.
-        "get_sync_time" => Ok(Reply::json(Value::Null)),
-        "get_pipe_columns_types" => Ok(Reply::json(json!({}))),
+        "get_pipe_rowcount" => Ok(Reply::json(rowcount(config, &key, query)?)),
+        "get_sync_time" => Ok(Reply::json(sync_time(config, &key, context)?)),
+        "get_pipe_columns_types" => {
+            let dtypes = catalog_entry(req, &key)?
+                .and_then(|e| e.dtypes)
+                .unwrap_or_default();
+            Ok(Reply::json(Value::Object(dtypes)))
+        }
         "sync_pipe" => Ok(Reply::json(match write(req, &key, data) {
             Ok(reply) => reply,
             Err(reason) => json!([false, reason.to_string()]),
@@ -455,4 +552,87 @@ pub(crate) fn action(request: &Request, command: &str) -> Result<Reply> {
             .as_str()
             .ok_or_else(|| error("Invalid action reply."))?
     ])))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_attributes_include_sql_schema_and_omit_empty() {
+        let sql_entry: Entry = serde_json::from_value(json!({
+            "id": 2,
+            "key": ["sensor", "weather", "roof"],
+            "instance": "sql:local",
+            "read": true,
+            "write": true,
+            "filters": ["begin", "end", "params"],
+            "columns": {"datetime": "dt", "station": "station"},
+            "dtypes": {"dt": "datetime", "station": "string", "celsius": "float"},
+        }))
+        .expect("sql entry");
+        let attrs = sql_entry.attributes();
+        assert_eq!(
+            attrs["parameters"]["columns"],
+            json!({"datetime": "dt", "station": "station"})
+        );
+        assert_eq!(
+            attrs["parameters"]["dtypes"],
+            json!({"dt": "datetime", "station": "string", "celsius": "float"})
+        );
+        assert_eq!(
+            attrs["parameters"]["locks"],
+            json!(["clear", "drop", "delete", "parameters"])
+        );
+
+        let legacy_entry: Entry = serde_json::from_value(json!({
+            "id": 1,
+            "key": ["sensor", "audit", null],
+            "instance": "journal:local",
+            "read": true,
+            "write": false,
+        }))
+        .expect("legacy entry");
+        let legacy_attrs = legacy_entry.attributes();
+        let params = legacy_attrs["parameters"].as_object().expect("parameters");
+        assert!(!params.contains_key("columns"));
+        assert!(!params.contains_key("dtypes"));
+        assert_eq!(params["locks"], json!(["all"]));
+    }
+
+    #[test]
+    fn sync_time_reply_handles_null_int_and_datetime() {
+        assert_eq!(parse_sync_time_reply(Value::Null).unwrap(), Value::Null);
+        assert_eq!(parse_sync_time_reply(json!(42)).unwrap(), json!(42));
+        assert_eq!(parse_sync_time_reply(json!(-7)).unwrap(), json!(-7));
+        assert_eq!(
+            parse_sync_time_reply(json!({"$us": 1717430701123456_i64})).unwrap(),
+            json!("2024-06-03T16:05:01.123456Z")
+        );
+        assert_eq!(
+            parse_sync_time_reply(json!({"$us": -1_000_000_i64})).unwrap(),
+            json!("1969-12-31T23:59:59.000000Z")
+        );
+        assert!(parse_sync_time_reply(json!("unexpected")).is_err());
+        assert!(parse_sync_time_reply(json!({"$us": "bad"})).is_err());
+        assert!(parse_sync_time_reply(json!({"$us": 1, "extra": 2})).is_err());
+    }
+
+    #[test]
+    fn wire_datetime_roundtrips_and_op_unavailable_matches_exactly() {
+        let encoded = wire_datetime("2024-06-03T16:05:01.123456Z").unwrap();
+        assert_eq!(encoded, json!({"$us": 1717430701123456_i64}));
+        let decoded = from_wire_datetime(encoded.as_object().unwrap()).unwrap();
+        assert_eq!(decoded, "2024-06-03T16:05:01.123456Z");
+
+        assert!(is_op_unavailable(&Error::Message(
+            "operation unavailable".into()
+        )));
+        assert!(is_op_unavailable(&Error::Message(
+            "Operation Unavailable".into()
+        )));
+        assert!(!is_op_unavailable(&Error::Message(
+            "Pipe unavailable for sync_time".into()
+        )));
+    }
 }

@@ -102,7 +102,8 @@ class Device:
                         x for x in ("show pipes", "help") if x.startswith(req["line"])
                     ]
                 else:
-                    raise ValueError(req)
+                    # Simulate a v0.2.1 device without additive sync_time/rowcount ops.
+                    failure = "operation unavailable"
                 reply = dict(v=1, id=req["id"], ok=not failure)
                 if failure:
                     reply["error"] = failure
@@ -461,6 +462,14 @@ def qualify(root, library, transport_python):
             {"value": 3},
             {"value": 4},
         ]
+        # Older v0.2.1 device fallback: missing columns/dtypes and operation unavailable.
+        assert remote.get_columns_types() == {}
+        assert remote.get_sync_time() is None
+        assert remote.get_rowcount() == len(device.rows)
+        rc_report = command("show", "rowcounts", "-i", "micro:bench", "-m", "readings")
+        assert str(len(device.rows)) in rc_report, rc_report
+        cols_report = command("show", "columns", "-i", "micro:bench", "-m", "readings")
+        assert "readings" in cols_report, cols_report
         archive = mrsm.Pipe("archive", "from_device", instance="sql:main")
         ok, msg = archive.sync(remote.get_docs(limit=2))
         assert ok and archive.get_docs(limit=2) == rows, msg
@@ -635,30 +644,123 @@ def helper_guard_tests(device, settings, python, recovery_token):
 
 
 def device_rows():
+    from datetime import datetime, timezone
     import meerschaum as mrsm
 
     remote = mrsm.Pipe("sensor", "temperature", instance="micro:device")
-    source = mrsm.Pipe("station", "source", instance="sql:main")
-    assert source.sync([{"tick": 15, "value": 43}, {"tick": 20, "value": 50}])[0]
+    assert remote.columns == {"datetime": "tick"}, remote.columns
+    assert remote.get_columns_types() == {"tick": "int", "value": "int"}, (
+        remote.get_columns_types()
+    )
+    assert set(remote.dtypes.keys()) == {"tick", "value"}, remote.dtypes
+    assert remote.get_sync_time() is None
+    assert remote.get_rowcount() == 0
+
+    source = mrsm.Pipe(
+        "sensor",
+        "temperature",
+        instance="sql:main",
+        columns={"datetime": "tick"},
+        dtypes={"tick": "int", "value": "int"},
+    )
+    assert source.sync([{"tick": 15, "value": 43}, {"tick": 2000, "value": 50}])[0]
     ok, message = remote.sync(source.get_docs(limit=2))
     assert ok, message
-    ok, message = remote.sync([{"tick": 20, "value": 55}])
+    # Mutate tick=15 on device and tick=2000 on device; incremental copy from sync_time=2000
+    # with default 1440 backtrack window starts at tick=560, leaving tick=15 untouched.
+    ok, message = remote.sync([{"tick": 15, "value": 99}, {"tick": 2000, "value": 55}])
     assert ok, message
-    filtered = remote.get_docs(begin=18, end=22, params={"value": 55}, limit=1)
-    assert filtered == [{"tick": 20, "value": 55}], filtered
+    assert remote.get_sync_time() == 2000, remote.get_sync_time()
+    assert remote.get_sync_time(params={"value": 99}) == 15
+    assert remote.get_sync_time(params={"value": 999}) is None
+    assert remote.get_rowcount() == 2
+    assert remote.get_rowcount(begin=1998, end=2002) == 1
+    assert remote.get_rowcount(params={"value": 55}) == 1
+    filtered = remote.get_docs(begin=1998, end=2002, params={"value": 55}, limit=1)
+    assert filtered == [{"tick": 2000, "value": 55}], filtered
+    assert remote.get_docs(order="desc", limit=2) == [
+        {"tick": 2000, "value": 55},
+        {"tick": 15, "value": 99},
+    ]
     local = mrsm.Pipe("station", "pull", instance="sql:main")
     assert local.sync(remote.get_docs(limit=2))[0]
     assert local.get_docs(limit=2) == [
-        {"tick": 15, "value": 43},
-        {"tick": 20, "value": 55},
+        {"tick": 15, "value": 99},
+        {"tick": 2000, "value": 55},
     ]
-    from datetime import datetime, timezone
 
-    stamp = datetime(2024, 6, 3, 16, 5, 1, 123456, tzinfo=timezone.utc)
-    journal = mrsm.Pipe("sensor", "audit", instance="micro:device")
-    ok, message = journal.sync([{"when": stamp, "event": "sample"}])
+    # Datetime-axis sql:local pipe with extra key and mixed dtypes.
+    weather = mrsm.Pipe("sensor", "weather", instance="micro:device")
+    assert weather.columns == {"datetime": "dt", "station": "station"}, weather.columns
+    assert weather.get_columns_types() == {
+        "dt": "datetime",
+        "station": "string",
+        "celsius": "float",
+        "ok": "bool",
+    }, weather.get_columns_types()
+    assert set(weather.dtypes.keys()) == {"dt", "station", "celsius", "ok"}, weather.dtypes
+    t1 = datetime(2024, 6, 3, 16, 5, 1, 123456, tzinfo=timezone.utc)
+    t2 = datetime(2024, 6, 3, 16, 10, 0, 0, tzinfo=timezone.utc)
+    ok, message = weather.sync(
+        [
+            {"dt": t1, "station": "north", "celsius": 21.5, "ok": True},
+            {"dt": t2, "station": "south", "celsius": 24.0, "ok": False},
+        ]
+    )
     assert ok, message
-    assert journal.get_docs(limit=1) == [{"when": stamp, "event": "sample"}]
+    assert weather.get_sync_time() == t2, weather.get_sync_time()
+    assert weather.get_sync_time(params={"station": "north"}) == t1
+    assert weather.get_rowcount() == 2
+    assert weather.get_rowcount(params={"station": "south"}) == 1
+    assert weather.get_docs(order="desc", limit=1) == [
+        {"dt": t2, "station": "south", "celsius": 24.0, "ok": False}
+    ]
+
+    # sql:local pipe exceeding 128 rows: rowcount, sync_time, and descending tail reads.
+    bulk = mrsm.Pipe("sensor", "bulk", instance="micro:device")
+    assert bulk.get_rowcount() == 140
+    assert bulk.get_rowcount(begin=100, end=120) == 20
+    assert bulk.get_sync_time() == 140
+    assert bulk.get_docs(order="desc", limit=3) == [
+        {"tick": 140, "value": 1400},
+        {"tick": 139, "value": 1390},
+        {"tick": 138, "value": 1380},
+    ]
+
+    # Journal pipe: no schema/sync_time, exact rowcount, descending read rejected.
+    journal = mrsm.Pipe("sensor", "audit", instance="micro:device")
+    assert journal.get_columns_types() == {}
+    assert journal.get_sync_time() is None
+    assert journal.get_rowcount() == 0
+    ok, message = journal.sync([{"when": t1, "event": "sample"}])
+    assert ok, message
+    assert journal.get_rowcount() == 1
+    assert journal.get_docs(limit=1) == [{"when": t1, "event": "sample"}]
+    try:
+        journal.get_docs(limit=1, order="desc")
+        raise AssertionError("journal accepted descending read")
+    except Exception as exc:
+        assert "ascending" in str(exc).lower(), exc
+
+    # Add newer rows in sql:main for the incremental copy test below.
+    assert source.sync([{"tick": 2005, "value": 60}, {"tick": 2010, "value": 65}])[0]
+
+
+def verify_incremental_device_rows():
+    import meerschaum as mrsm
+
+    remote = mrsm.Pipe("sensor", "temperature", instance="micro:device")
+    assert remote.get_rowcount() == 4, remote.get_rowcount()
+    assert remote.get_sync_time() == 2010, remote.get_sync_time()
+    assert remote.get_docs(limit=4) == [
+        {"tick": 15, "value": 99},
+        {"tick": 2000, "value": 50},
+        {"tick": 2005, "value": 60},
+        {"tick": 2010, "value": 65},
+    ], remote.get_docs(limit=4)
+    copied = mrsm.Pipe("sensor", "temperature", instance="sql:local")
+    assert copied.get_rowcount() == 4, copied.get_rowcount()
+    assert copied.get_docs(limit=4) == remote.get_docs(limit=4)
 
 
 def micropython(root, executable, modules, python):
@@ -705,8 +807,74 @@ def micropython(root, executable, modules, python):
             "micro", "action", "show", "pipes", "-i", "micro:device"
         )
         assert "temperature" in command("show", "pipes", "-i", "micro:device")
+        detail = command("show", "pipes", "-i", "micro:device", "-m", "weather")
+        assert "weather" in detail, detail
+        detail_json = json.loads(
+            command("show", "pipes", "-i", "micro:device", "-m", "weather", "--nopretty")
+        )
+        assert detail_json["parameters"]["columns"] == {
+            "datetime": "dt",
+            "station": "station",
+        }, detail_json
+        assert detail_json["parameters"]["dtypes"] == {
+            "dt": "datetime",
+            "station": "string",
+            "celsius": "float",
+            "ok": "bool",
+        }, detail_json
+        cols = command("show", "columns", "-i", "micro:device", "-m", "weather")
+        assert (
+            "dt" in cols
+            and "station" in cols
+            and "celsius" in cols
+            and "datetime" in cols
+        ), cols
+        counts = command("show", "rowcounts", "-i", "micro:device")
+        assert "bulk" in counts and "140" in counts and "weather" in counts, counts
+        bulk_data = command("show", "data", "-i", "micro:device", "-m", "bulk")
+        assert "140" in bulk_data and "1400" in bulk_data, bulk_data
+        weather_data = command("show", "data", "-i", "micro:device", "-m", "weather")
+        assert "south" in weather_data and "21.5" in weather_data, weather_data
+        # Incremental copy into an ALREADY-POPULATED writable sql:local pipe on the device!
+        inc_report = command(
+            "copy",
+            "pipes",
+            "micro:device",
+            "-i",
+            "sql:main",
+            "-m",
+            "temperature",
+            "--sync-data",
+            "incremental",
+            "-y",
+        )
+        assert "Failed" not in inc_report, inc_report
+        # Reverse copy (device -> sql:local) with columns set must copy all rows, not just newest.
+        rev_report = command(
+            "copy",
+            "pipes",
+            "sql:local",
+            "-i",
+            "micro:device",
+            "-m",
+            "temperature",
+            "--sync-data",
+            "all",
+            "-y",
+        )
+        assert "Failed" not in rev_report, rev_report
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from device_instance import verify_incremental_device_rows; verify_incremental_device_rows()",
+            ],
+            check=True,
+            cwd=PLUGIN / "tests",
+            timeout=60,
+        )
         print(
-            "Passed host SQL → device SQLite → host SQL with bounded filtered reads and an upsert."
+            "Passed host SQL <-> device SQLite schema, rowcount (>128), sync_time, show data/columns/rowcounts, and incremental copy."
         )
     finally:
         proc.terminate()

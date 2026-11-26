@@ -7,8 +7,14 @@ from micromeerschaum import Timestamp, default_actions
 PREFIX = b"@micro "
 FRAME_LIMIT = 4096
 _OPTIONS = {
-    "catalog": ("offset", "limit"), "read": ("key", "limit", "begin", "end", "params"),
-    "write": ("key", "rows"), "actions": (), "complete": ("line",), "action": ("line",),
+    "catalog": ("offset", "limit"),
+    "read": ("key", "limit", "begin", "end", "params", "order"),
+    "write": ("key", "rows"),
+    "sync_time": ("key", "params"),
+    "rowcount": ("key", "begin", "end", "params"),
+    "actions": (),
+    "complete": ("line",),
+    "action": ("line",),
 }
 
 
@@ -26,6 +32,15 @@ def _scalar(value):
     raise ValueError("expected a document scalar")
 
 
+def _params(params):
+    if params is None:
+        return None
+    if not isinstance(params, dict):
+        raise ValueError("expected params object")
+    return {k: [_scalar(v) for v in val] if isinstance(val, list) else _scalar(val)
+            for k, val in params.items()}
+
+
 def _wire_doc(row):
     return {k: {"$us": v.us} if isinstance(v, Timestamp) else v for k, v in row.items()}
 
@@ -37,9 +52,13 @@ def _frame(ident, ok, result):
 
 
 def _catalog(entry, operations):
-    return {"id": entry.id, "key": entry.key, "instance": entry.pipe.instance_keys,
+    item = {"id": entry.id, "key": entry.key, "instance": entry.pipe.instance_keys,
             "read": entry.read and "read" in operations, "write": entry.write and "write" in operations,
             "filters": ["begin", "end", "params"] if entry.pipe.instance_keys == "sql:local" else []}
+    if entry.pipe.instance_keys == "sql:local":
+        item["columns"] = entry.pipe.columns
+        item["dtypes"] = entry.pipe.dtypes
+    return item
 
 
 class DeviceSession:
@@ -52,6 +71,11 @@ class DeviceSession:
             raise ValueError("unknown session operation")
         if any(name not in registry.names() for name in self.allowed_actions):
             raise ValueError("unknown session action")
+
+    def _admitted(self, op):
+        if op in self.operations:
+            return True
+        return op in ("sync_time", "rowcount") and "read" in self.operations
 
     def _catalog(self, request, ident):
         offset = _integer(request.get("offset", 0), 0, (1 << 63) - 1, "catalog offset")
@@ -77,23 +101,25 @@ class DeviceSession:
                 all(isinstance(v, str) and v for v in key[:2]) and
                 (key[2] is None or isinstance(key[2], str))):
             raise ValueError("expected a Pipe key triple")
+        need_write = op == "write"
         for entry in self.registry.entries():
-            if entry.key == tuple(key) and (entry.read if op == "read" else entry.write):
+            if entry.key == tuple(key) and (entry.write if need_write else entry.read):
                 return entry.pipe
         raise ValueError("Pipe unavailable for " + op)
 
     def _read(self, request, pipe):
         limit = _integer(request.get("limit"), 0, 128, "read limit")
+        order = request.get("order", "asc")
+        if order not in ("asc", "desc"):
+            raise ValueError("order must be 'asc' or 'desc'")
         begin, end, params = (request.get(k) for k in ("begin", "end", "params"))
         store = pipe._config().store
         if pipe.instance_keys == "sql:local":
-            if params is not None:
-                if not isinstance(params, dict):
-                    raise ValueError("expected params object")
-                params = {k: [_scalar(v) for v in val] if isinstance(val, list) else _scalar(val)
-                          for k, val in params.items()}
-            rows = store.docs(_scalar(begin), _scalar(end), params, limit, FRAME_LIMIT)
+            rows = store.docs(_scalar(begin), _scalar(end), _params(params),
+                              limit, FRAME_LIMIT, desc=(order == "desc"))
             return [_wire_doc(row) for row in rows]
+        if order != "asc":
+            raise ValueError("journal reads support ascending order only")
         if begin is not None or end is not None or params not in (None, {}):
             raise ValueError("journal reads support limit only")
         rows, size = [], 0
@@ -106,9 +132,33 @@ class DeviceSession:
             rows.append(doc)
         return rows
 
+    def _sync_time(self, request, pipe):
+        params = request.get("params")
+        if pipe.instance_keys == "sql:local":
+            store = pipe._config().store
+            value = store.sync_time(_params(params))
+            if value is None:
+                return None
+            axis, cols, _ = store.definition()
+            for name, dtype_name, _ in cols:
+                if name == axis:
+                    return {"$us": value} if dtype_name == "datetime" else value
+            return value
+        if params not in (None, {}):
+            raise ValueError("journal sync_time does not support filters")
+        return None
+
+    def _rowcount(self, request, pipe):
+        begin, end, params = (request.get(k) for k in ("begin", "end", "params"))
+        if pipe.instance_keys == "sql:local":
+            return pipe._config().store.rowcount(_scalar(begin), _scalar(end), _params(params))
+        if begin is not None or end is not None or params not in (None, {}):
+            raise ValueError("journal rowcount does not support filters")
+        return pipe.get_rowcount()
+
     def _execute(self, request, ident):
         op = request.get("op")
-        if op not in self.operations:
+        if not self._admitted(op):
             raise ValueError("operation unavailable")
         if any(k not in ("id", "v", "op") and k not in _OPTIONS[op] for k in request):
             raise ValueError("unknown request field")
@@ -124,6 +174,10 @@ class DeviceSession:
             pipe = self._pipe(request, op)
             if op == "read":
                 return self._read(request, pipe)
+            if op == "sync_time":
+                return self._sync_time(request, pipe)
+            if op == "rowcount":
+                return self._rowcount(request, pipe)
             rows = request.get("rows")
             if not isinstance(rows, list) or len(rows) > 128:
                 raise ValueError("expected at most 128 rows")
