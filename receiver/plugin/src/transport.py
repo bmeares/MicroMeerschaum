@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import os
 import secrets
 import sys
 import time
@@ -75,12 +76,137 @@ def _build_frame(request, token=None):
     return op, token, frame
 
 
+class _PosixSerial:
+    """Minimal stdlib POSIX serial transport when pyserial is unavailable."""
+
+    def __init__(self, port, baudrate, timeout, write_timeout):
+        import fcntl
+        import select
+        import struct
+        import termios
+
+        self._fcntl = fcntl
+        self._select = select
+        self._struct = struct
+        self._termios = termios
+        self._timeout = min(0.1, timeout)
+        self._write_timeout = write_timeout
+        self._fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            if sys.platform.startswith("linux"):
+                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    # Clear DTR (0x002) and RTS (0x004) so opening leaves the board running.
+                    fcntl.ioctl(self._fd, 0x5417, struct.pack("I", 0x006))
+                except OSError:
+                    pass
+            attrs = termios.tcgetattr(self._fd)
+            attrs[0] &= ~(
+                termios.IGNBRK
+                | termios.BRKINT
+                | termios.PARMRK
+                | termios.ISTRIP
+                | termios.INLCR
+                | termios.IGNCR
+                | termios.ICRNL
+                | termios.IXON
+                | termios.IXOFF
+                | termios.IXANY
+            )
+            attrs[1] &= ~termios.OPOST
+            attrs[2] &= ~(termios.CSIZE | termios.PARENB | termios.CSTOPB)
+            attrs[2] |= termios.CS8 | termios.CREAD | termios.CLOCAL
+            attrs[3] &= ~(
+                termios.ECHO
+                | termios.ECHONL
+                | termios.ICANON
+                | termios.ISIG
+                | termios.IEXTEN
+            )
+            speed = getattr(termios, f"B{baudrate}", None)
+            if speed is None:
+                raise ValueError(f"Unsupported serial baudrate: {baudrate}")
+            attrs[4] = speed
+            attrs[5] = speed
+            attrs[6][termios.VMIN] = 0
+            attrs[6][termios.VTIME] = 0
+            termios.tcsetattr(self._fd, termios.TCSANOW, attrs)
+        except BaseException:
+            os.close(self._fd)
+            self._fd = -1
+            raise
+
+    @property
+    def in_waiting(self):
+        fionread = getattr(self._termios, "FIONREAD", None)
+        if fionread is None or self._fd < 0:
+            return 0
+        try:
+            buf = self._fcntl.ioctl(self._fd, fionread, self._struct.pack("I", 0))
+            return self._struct.unpack("I", buf)[0]
+        except OSError:
+            return 0
+
+    def write(self, data):
+        view = memoryview(data)
+        sent = 0
+        deadline = time.monotonic() + self._write_timeout
+        while sent < len(view):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out writing to serial port")
+            _, writable, _ = self._select.select([], [self._fd], [], remaining)
+            if not writable:
+                raise TimeoutError("Timed out writing to serial port")
+            try:
+                count = os.write(self._fd, view[sent:])
+            except BlockingIOError:
+                continue
+            if count <= 0:
+                raise OSError("Incomplete serial write")
+            sent += count
+        return sent
+
+    def read(self, size=1):
+        readable, _, _ = self._select.select([self._fd], [], [], self._timeout)
+        if not readable:
+            return b""
+        try:
+            return os.read(self._fd, max(1, size))
+        except BlockingIOError:
+            return b""
+
+    def close(self):
+        if self._fd >= 0:
+            fd, self._fd = self._fd, -1
+            os.close(fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+
 def _serial_open(config, timeout):
-    import serial
     port = config.get("port")
     if not isinstance(port, str) or not port:
         raise ValueError("A USB serial port is required")
-    link = serial.Serial(port=None, baudrate=int(config.get("baudrate", 115200)),
+    baudrate = int(config.get("baudrate", 115200))
+    if not config.get("_force_posix_serial"):
+        try:
+            import serial
+        except ImportError:
+            serial = None
+    else:
+        serial = None
+    if serial is None:
+        if os.name == "posix":
+            return _PosixSerial(port, baudrate, timeout, timeout)
+        raise RuntimeError(
+            "Install pyserial (pip install pyserial) for USB serial support"
+        )
+    link = serial.Serial(port=None, baudrate=baudrate,
                          timeout=min(0.1, timeout), write_timeout=timeout)
     # Opening the control channel should leave the board running.
     link.dtr = False
@@ -89,6 +215,17 @@ def _serial_open(config, timeout):
     if sys.platform.startswith("linux"):
         link.exclusive = True
     return link
+
+
+def _discover_ports():
+    try:
+        from serial.tools import list_ports
+
+        ports = list(list_ports.comports())
+        usb = [p.device for p in ports if p.vid is not None]
+        return sorted(usb if usb else [p.device for p in ports])
+    except ImportError:
+        return []
 
 
 def _serial_exchange(link, frame, response, timeout, sending):
@@ -349,6 +486,8 @@ if __name__ == "__main__":
                 report({"ok": True, "data": reconcile(config, request["token"])})
             elif request["op"] == "pending_write":
                 report({"ok": True, "data": pending_write(config, request["key"], request["label"])})
+            elif request["op"] == "discover":
+                report({"ok": True, "data": _discover_ports()})
             else:
                 report({"ok": True, "data": exchange(config, request)})
     except KeyboardInterrupt:

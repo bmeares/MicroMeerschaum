@@ -1063,6 +1063,94 @@ def micropython(root, executable, modules, python):
         os.close(master)
 
 
+def auto_detect_tests(root, library):
+    """Verify zero-config USB auto-detection, direct port labels, multi-port probing, and stdlib POSIX serial."""
+    plugins = root / "plugins"
+    config = {
+        "meerschaum": {
+            "instance": "sql:main",
+            "executor": "local",
+            "connectors": {
+                "sql": {
+                    "main": {"flavor": "sqlite", "database": str(root / "auto.db")}
+                }
+            },
+        }
+    }
+    base_env = dict(
+        os.environ,
+        MRSM_ROOT_DIR=str(root),
+        MRSM_PLUGINS_DIR=str(plugins),
+        MRSM_NO_AUTO_INSTALL="1",
+        MRSM_NO_UPDATE_CHECK="1",
+        MRSM_CONFIG=json.dumps(config),
+    )
+
+    def run_cmd(*argv, env_extra=None, stdin_text=None, ok=True):
+        env = dict(base_env, **(env_extra or {}))
+        result = subprocess.run(
+            ["mrsm", *argv],
+            cwd=str(root),
+            env=env,
+            input=stdin_text.encode() if stdin_text is not None else None,
+            capture_output=True,
+            timeout=30,
+        )
+        out = (result.stdout + result.stderr).decode()
+        assert (result.returncode == 0) == ok, (argv, result.returncode, out)
+        return out
+
+    # 1. Zero USB ports -> clear actionable error.
+    err = run_cmd("micro", "action", "show pipes", env_extra={"MRSM_MICRO_USB_PORTS": ""}, ok=False)
+    assert "No USB MicroMeerschaum device detected" in err, err
+
+    # 2. Single USB port -> works zero-config with stdlib POSIX serial (no pyserial needed).
+    dev1 = Device()
+    try:
+        env1 = {"MRSM_MICRO_USB_PORTS": dev1.port, "MRSM_PYTHON": sys.executable}
+        out = run_cmd("micro", "action", "show pipes", env_extra=env1)
+        assert "Ran show pipes" in out, out
+        piped = run_cmd("micro", "shell", env_extra=env1, stdin_text="show pipes\nquit\n")
+        assert "Ran show pipes" in piped, piped
+        pipes_auto = run_cmd("show", "pipes", "-i", "micro:auto", env_extra=env1)
+        assert "readings" in pipes_auto and "readonly" in pipes_auto, pipes_auto
+        pipes_direct = run_cmd(
+            "show", "pipes", "-i", f"micro:{dev1.port}", env_extra={"MRSM_MICRO_USB_PORTS": "", "MRSM_PYTHON": sys.executable}
+        )
+        assert "readings" in pipes_direct, pipes_direct
+
+        # 3. Multiple ports (one silent non-micro port + one live MicroMeerschaum device) -> probes and selects live device.
+        silent_master, silent_slave = pty.openpty()
+        tty.setraw(silent_slave)
+        silent_port = os.ttyname(silent_slave)
+        try:
+            env_mixed = {
+                "MRSM_MICRO_USB_PORTS": f"{silent_port}{os.pathsep}{dev1.port}",
+                "MRSM_PYTHON": sys.executable,
+            }
+            out = run_cmd("micro", "action", "show pipes", env_extra=env_mixed)
+            assert "Ran show pipes" in out, out
+        finally:
+            os.close(silent_master)
+            os.close(silent_slave)
+
+        # 4. Two live MicroMeerschaum devices -> returns clear disambiguation error listing both ports.
+        dev2 = Device()
+        try:
+            env_both = {
+                "MRSM_MICRO_USB_PORTS": f"{dev1.port}{os.pathsep}{dev2.port}",
+                "MRSM_PYTHON": sys.executable,
+            }
+            err_both = run_cmd("micro", "action", "show pipes", env_extra=env_both, ok=False)
+            assert "Multiple MicroMeerschaum USB devices detected" in err_both, err_both
+            assert dev1.port in err_both and dev2.port in err_both, err_both
+        finally:
+            dev2.close()
+    finally:
+        dev1.close()
+    print("Passed zero-config USB auto-detection, direct port labels, multi-port probing, and stdlib POSIX serial.")
+
+
 if __name__ == "__main__":
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--library", type=Path, required=True)
@@ -1081,6 +1169,7 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as root:
         python = os.path.abspath(args.python)
         qualify(Path(root), args.library.resolve(), python)
+        auto_detect_tests(Path(root), args.library.resolve())
         if args.micropython:
             micropython(
                 Path(root), args.micropython.resolve(), args.modules.resolve(), python

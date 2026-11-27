@@ -7,7 +7,9 @@ use meerschaum_plugin::{
 use serde::Deserialize;
 use std::{
     collections::{BTreeSet, HashSet},
+    env, fs,
     io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Mutex,
 };
@@ -192,16 +194,17 @@ fn catalog(config: &Value) -> Result<Vec<Entry>> {
     }
 }
 
-fn write_incident_or(req: &Request, key: &Key, failure: Error) -> Error {
-    let query = json!({"op":"pending_write","key":key,"label":req.label});
-    match exchange(&req.config, query) {
+fn write_incident_or(config: &Value, label: &str, key: &Key, failure: Error) -> Error {
+    let query = json!({"op":"pending_write","key":key,"label":label});
+    match exchange(config, query) {
         Ok(Value::String(incident)) => error(incident),
         _ => failure,
     }
 }
 
-fn catalog_entry(req: &Request, key: &Key) -> Result<Option<Entry>> {
-    let entries = catalog(&req.config).map_err(|failure| write_incident_or(req, key, failure))?;
+fn catalog_entry(config: &Value, label: &str, key: &Key) -> Result<Option<Entry>> {
+    let entries =
+        catalog(config).map_err(|failure| write_incident_or(config, label, key, failure))?;
     Ok(entries.into_iter().find(|entry| &entry.key == key))
 }
 
@@ -408,11 +411,11 @@ fn frame(rows: Vec<Value>, query: &Value) -> Result<Frame> {
     Frame::from_rows(rows, &dtypes)
 }
 
-fn write(req: &Request, key: &Key, data: Option<Frame>) -> Result<Value> {
-    let config = &req.config;
-    if !catalog_entry(req, key)?.is_some_and(|entry| entry.write) {
+fn write(config: &Value, label: &str, key: &Key, data: Option<Frame>) -> Result<Value> {
+    if !catalog_entry(config, label, key)?.is_some_and(|entry| entry.write) {
         return Err(write_incident_or(
-            req,
+            config,
+            label,
             key,
             error("Pipe is not exposed for writing."),
         ));
@@ -433,7 +436,7 @@ fn write(req: &Request, key: &Key, data: Option<Frame>) -> Result<Value> {
         }
     }
     let mut settings = config.clone();
-    settings["_micro_label"] = json!(req.label);
+    settings["_micro_label"] = json!(label);
     let message = exchange(&settings, json!({"op":"write","key":key,"rows":rows}))?;
     Ok(json!([
         true,
@@ -443,8 +446,344 @@ fn write(req: &Request, key: &Key, data: Option<Frame>) -> Result<Value> {
     ]))
 }
 
+fn is_serial_port_label(label: &str) -> bool {
+    if label.starts_with('/') {
+        return true;
+    }
+    let upper = label.to_ascii_uppercase();
+    if let Some(rest) = upper.strip_prefix("COM") {
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
+}
+
+fn is_auto_label(label: &str) -> bool {
+    matches!(label, "auto" | "usb")
+}
+
+fn has_transport_endpoint(config: &Value) -> bool {
+    let Some(obj) = config.as_object() else {
+        return false;
+    };
+    obj.get("port")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+        || obj
+            .get("address")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+}
+
+fn port_priority(path: &str) -> u8 {
+    let lower = path.to_ascii_lowercase();
+    if lower.contains("espressif")
+        || lower.contains("esp32")
+        || lower.contains("micropython")
+        || lower.contains("circuitpython")
+        || lower.contains("rp2040")
+        || lower.contains("pico")
+        || lower.contains("cp210")
+        || lower.contains("silicon_labs")
+        || lower.contains("ch340")
+        || lower.contains("ch341")
+        || lower.contains("ch910")
+        || lower.contains("ftdi")
+        || lower.contains("usb_jtag")
+    {
+        return 0;
+    }
+    if lower.contains("ttyacm") || lower.contains("usbmodem") {
+        return 1;
+    }
+    if lower.contains("ttyusb") || lower.contains("usbserial") || lower.contains("slab_usbtouart") {
+        return 2;
+    }
+    3
+}
+
+fn discover_usb_ports_in(by_id_dir: &Path, dev_dir: &Path) -> Vec<String> {
+    let mut ports = Vec::new();
+    let mut seen_targets = HashSet::new();
+
+    if let Ok(entries) = fs::read_dir(by_id_dir) {
+        let mut links: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        links.sort();
+        for link in links {
+            let target = fs::canonicalize(&link).unwrap_or_else(|_| link.clone());
+            if seen_targets.insert(target) {
+                ports.push(link.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(dev_dir) {
+        let mut devs: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+                    name.starts_with("ttyACM")
+                        || name.starts_with("ttyUSB")
+                        || name.starts_with("cu.usbmodem")
+                        || name.starts_with("cu.usbserial")
+                        || name.starts_with("cu.SLAB_USBtoUART")
+                        || name.starts_with("cu.wchusbserial")
+                })
+            })
+            .collect();
+        devs.sort();
+        for dev in devs {
+            let target = fs::canonicalize(&dev).unwrap_or_else(|_| dev.clone());
+            if seen_targets.insert(target) {
+                ports.push(dev.to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    ports.sort_by(|a, b| {
+        port_priority(a)
+            .cmp(&port_priority(b))
+            .then_with(|| a.cmp(b))
+    });
+    ports
+}
+
+fn discover_usb_ports(defaults: &Value) -> Vec<String> {
+    if let Some(raw) = env::var_os("MRSM_MICRO_USB_PORTS") {
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        let mut ports: Vec<String> = env::split_paths(&raw)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        ports.sort_by(|a, b| {
+            port_priority(a)
+                .cmp(&port_priority(b))
+                .then_with(|| a.cmp(b))
+        });
+        return ports;
+    }
+
+    let ports = discover_usb_ports_in(Path::new("/dev/serial/by-id"), Path::new("/dev"));
+    if !ports.is_empty() {
+        return ports;
+    }
+
+    if let Ok(Value::Array(items)) = exchange(defaults, json!({"op": "discover"})) {
+        let mut found: Vec<String> = items
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .filter(|s| !s.is_empty())
+            .collect();
+        found.sort_by(|a, b| {
+            port_priority(a)
+                .cmp(&port_priority(b))
+                .then_with(|| a.cmp(b))
+        });
+        return found;
+    }
+    Vec::new()
+}
+
+fn micro_defaults() -> Value {
+    host::config(&["meerschaum", "connectors", "micro", "default"])
+        .ok()
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
+}
+
+fn merge_defaults(defaults: &Value, overrides: &Value) -> Value {
+    let mut merged = defaults.as_object().cloned().unwrap_or_default();
+    if let Some(map) = overrides.as_object() {
+        for (k, v) in map {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    Value::Object(merged)
+}
+
+fn serial_config(defaults: &Value, port: &str) -> Value {
+    merge_defaults(defaults, &json!({"transport": "serial", "port": port}))
+}
+
+fn short_port_label(port: &str) -> String {
+    let target = fs::canonicalize(port).unwrap_or_else(|_| PathBuf::from(port));
+    target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| port.to_owned())
+}
+
+fn canonical_port(port: &str) -> PathBuf {
+    fs::canonicalize(port).unwrap_or_else(|_| PathBuf::from(port))
+}
+
+fn configured_micro_connectors(defaults: &Value) -> Vec<(String, Value)> {
+    let Ok(Value::Object(map)) = host::config(&["meerschaum", "connectors", "micro"]) else {
+        return Vec::new();
+    };
+    let mut items: Vec<(String, Value)> = map
+        .into_iter()
+        .filter(|(label, value)| label != "default" && value.is_object())
+        .map(|(label, value)| (label, merge_defaults(defaults, &value)))
+        .filter(|(_, cfg)| has_transport_endpoint(cfg))
+        .collect();
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    items
+}
+
+fn match_configured_port(port: &str, defaults: &Value) -> Option<(String, Value)> {
+    let target = canonical_port(port);
+    for (label, cfg) in configured_micro_connectors(defaults) {
+        let transport = cfg["transport"].as_str().unwrap_or("serial");
+        if matches!(transport, "serial" | "usb")
+            && let Some(cfg_port) = cfg["port"].as_str()
+            && canonical_port(cfg_port) == target
+        {
+            return Some((format!("micro:{label}"), cfg));
+        }
+    }
+    None
+}
+
+fn probe_micro_port(defaults: &Value, port: &str) -> bool {
+    let mut cfg = serial_config(defaults, port);
+    if let Some(obj) = cfg.as_object_mut() {
+        let existing = obj.get("timeout").and_then(Value::as_f64).unwrap_or(1.0);
+        obj.insert("timeout".into(), json!(existing.min(1.0)));
+    }
+    exchange(&cfg, json!({"op": "actions"})).is_ok()
+        || exchange(&cfg, json!({"op": "catalog", "offset": 0, "limit": 0})).is_ok()
+}
+
+fn auto_detect_usb(defaults: &Value, fallback_sole_configured: bool) -> Result<(String, Value)> {
+    let ports = discover_usb_ports(defaults);
+    if ports.is_empty() {
+        if fallback_sole_configured {
+            let configured = configured_micro_connectors(defaults);
+            if let [(label, cfg)] = configured.as_slice() {
+                return Ok((format!("micro:{label}"), cfg.clone()));
+            }
+        }
+        return Err(error(
+            "No USB MicroMeerschaum device detected. Connect a device over USB, pass -i micro:<port>, or configure meerschaum.connectors.micro.<label>.",
+        ));
+    }
+
+    let selected = if ports.len() == 1 {
+        ports[0].clone()
+    } else {
+        let responding: Vec<String> = ports
+            .iter()
+            .filter(|port| probe_micro_port(defaults, port))
+            .cloned()
+            .collect();
+        match responding.as_slice() {
+            [one] => one.clone(),
+            [] => {
+                return Err(error(format!(
+                    "Found USB serial ports ({}), but none answered the MicroMeerschaum session protocol. Select a port explicitly with -i micro:<port>.",
+                    ports.join(", ")
+                )));
+            }
+            many => {
+                return Err(error(format!(
+                    "Multiple MicroMeerschaum USB devices detected ({}). Select one with -i micro:<port> or configure meerschaum.connectors.micro.<label>.",
+                    many.join(", ")
+                )));
+            }
+        }
+    };
+
+    if let Some(matched) = match_configured_port(&selected, defaults) {
+        return Ok(matched);
+    }
+    let label = short_port_label(&selected);
+    Ok((format!("micro:{label}"), serial_config(defaults, &selected)))
+}
+
+fn resolve_call_config(req: &Request) -> Result<(String, Value)> {
+    if has_transport_endpoint(&req.config) {
+        return Ok((req.label.clone(), req.config.clone()));
+    }
+    let defaults = micro_defaults();
+    let merged = merge_defaults(&defaults, &req.config);
+    if has_transport_endpoint(&merged) {
+        return Ok((req.label.clone(), merged));
+    }
+    if is_serial_port_label(&req.label) {
+        return Ok((
+            short_port_label(&req.label),
+            serial_config(&merged, &req.label),
+        ));
+    }
+    if is_auto_label(&req.label) || req.label == "main" {
+        let (instance, cfg) = auto_detect_usb(&merged, false)?;
+        let label = instance
+            .strip_prefix("micro:")
+            .unwrap_or(&req.label)
+            .to_owned();
+        return Ok((label, cfg));
+    }
+    Err(error(format!(
+        "Configure meerschaum.connectors.micro.{}, or use -i micro:auto / -i micro:<port>.",
+        req.label
+    )))
+}
+
+fn resolve_action_target(kw: &Value) -> Result<(String, Value)> {
+    let defaults = micro_defaults();
+    let explicit = kw["mrsm_instance"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let configured_default = host::config(&["meerschaum", "instance"])
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+
+    let selected_micro = explicit
+        .as_deref()
+        .and_then(|s| s.strip_prefix("micro:"))
+        .or_else(|| {
+            if explicit.is_none() {
+                configured_default.strip_prefix("micro:")
+            } else {
+                None
+            }
+        })
+        .filter(|l| !l.is_empty());
+
+    if let Some(label) = selected_micro {
+        let configured = host::config(&["meerschaum", "connectors", "micro", label])?;
+        if configured.is_object() {
+            return Ok((
+                format!("micro:{label}"),
+                merge_defaults(&defaults, &configured),
+            ));
+        }
+        if is_auto_label(label) {
+            return auto_detect_usb(&defaults, true);
+        }
+        if is_serial_port_label(label) {
+            return Ok((
+                format!("micro:{}", short_port_label(label)),
+                serial_config(&defaults, label),
+            ));
+        }
+        return Err(error(format!(
+            "Configure meerschaum.connectors.micro.{label} (or omit -i / use -i micro:auto to auto-detect a USB device)."
+        )));
+    }
+
+    auto_detect_usb(&defaults, true)
+}
+
 pub(crate) fn call(req: &Request, data: Option<Frame>) -> Result<Reply> {
-    let config = &req.config;
+    let (label, resolved_config) = resolve_call_config(req)?;
+    let config = &resolved_config;
     let context = &req.context;
     let query = &context["query"];
     let method = req.method.as_str();
@@ -479,17 +818,17 @@ pub(crate) fn call(req: &Request, data: Option<Frame>) -> Result<Reply> {
         "get_pipe_rowcount" => Ok(Reply::json(rowcount(config, &key, query)?)),
         "get_sync_time" => Ok(Reply::json(sync_time(config, &key, context)?)),
         "get_pipe_columns_types" => {
-            let dtypes = catalog_entry(req, &key)?
+            let dtypes = catalog_entry(config, &label, &key)?
                 .and_then(|e| e.dtypes)
                 .unwrap_or_default();
             Ok(Reply::json(Value::Object(dtypes)))
         }
-        "sync_pipe" => Ok(Reply::json(match write(req, &key, data) {
+        "sync_pipe" => Ok(Reply::json(match write(config, &label, &key, data) {
             Ok(reply) => reply,
             Err(reason) => json!([false, reason.to_string()]),
         })),
         _ => {
-            let e = catalog_entry(req, &key)?;
+            let e = catalog_entry(config, &label, &key)?;
             Ok(Reply::json(match method {
                 "pipe_exists" => json!(e.is_some()),
                 "get_pipe_id" => json!(e.map(|e| e.id)),
@@ -502,24 +841,7 @@ pub(crate) fn call(req: &Request, data: Option<Frame>) -> Result<Reply> {
 
 pub(crate) fn action(request: &Request, command: &str) -> Result<Reply> {
     let kw = &request.context["kwargs"];
-    let instance = if let Some(s) = kw["mrsm_instance"].as_str() {
-        s.to_string()
-    } else {
-        host::config(&["meerschaum", "instance"])?
-            .as_str()
-            .unwrap_or("")
-            .to_owned()
-    };
-    let label = instance
-        .strip_prefix("micro:")
-        .filter(|l| !l.is_empty())
-        .ok_or_else(|| error("Select a device with -i micro:<label>."))?;
-    let config = host::config(&["meerschaum", "connectors", "micro", label])?;
-    if !config.is_object() {
-        return Err(error(format!(
-            "Configure meerschaum.connectors.micro.{label}."
-        )));
-    }
+    let (instance, config) = resolve_action_target(kw)?;
     let args = kw["action"]
         .as_array()
         .into_iter()
@@ -541,7 +863,7 @@ pub(crate) fn action(request: &Request, command: &str) -> Result<Reply> {
     }
     if args.is_empty() {
         return Err(error(
-            "Supply a device action, e.g. mrsm micro action show pipes -i micro:bench.",
+            "Supply a device action, e.g. mrsm micro action show pipes.",
         ));
     }
     let words = args.join(" ");
@@ -634,5 +956,67 @@ mod tests {
         assert!(!is_op_unavailable(&Error::Message(
             "Pipe unavailable for sync_time".into()
         )));
+    }
+
+    #[test]
+    fn serial_port_labels_and_priority_follow_usb_conventions() {
+        assert!(is_serial_port_label("/dev/ttyACM0"));
+        assert!(is_serial_port_label(
+            "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_20:6E:F1:DC:CA:28-if00"
+        ));
+        assert!(is_serial_port_label("COM3"));
+        assert!(is_serial_port_label("com12"));
+        assert!(!is_serial_port_label("bench"));
+        assert!(!is_serial_port_label("auto"));
+        assert!(!is_serial_port_label("COM"));
+        assert!(!is_serial_port_label("COMabc"));
+
+        assert!(is_auto_label("auto"));
+        assert!(is_auto_label("usb"));
+        assert!(!is_auto_label("bench"));
+
+        assert!(
+            port_priority("/dev/serial/by-id/usb-Espressif_USB_JTAG_serial-if00")
+                < port_priority("/dev/ttyACM0")
+        );
+        assert!(port_priority("/dev/ttyACM0") < port_priority("/dev/ttyUSB0"));
+        assert!(port_priority("/dev/ttyUSB0") < port_priority("/dev/pts/4"));
+    }
+
+    #[test]
+    fn discover_usb_ports_deduplicates_by_id_and_orders_mcu_first() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dev = dir.path().join("dev");
+        let by_id = dev.join("serial/by-id");
+        fs::create_dir_all(&by_id).expect("mkdir");
+        let acm0 = dev.join("ttyACM0");
+        let usb0 = dev.join("ttyUSB0");
+        let ttys0 = dev.join("ttyS0");
+        fs::write(&acm0, b"").expect("acm0");
+        fs::write(&usb0, b"").expect("usb0");
+        fs::write(&ttys0, b"").expect("ttys0");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            &acm0,
+            by_id.join("usb-Espressif_USB_JTAG_serial_debug_unit-if00"),
+        )
+        .expect("symlink");
+
+        let ports = discover_usb_ports_in(&by_id, &dev);
+        assert_eq!(ports.len(), 2, "{ports:?}");
+        assert!(ports[0].contains("Espressif"), "{ports:?}");
+        assert!(ports[1].ends_with("ttyUSB0"), "{ports:?}");
+        assert!(!ports.iter().any(|p| p.ends_with("ttyS0")), "{ports:?}");
+    }
+
+    #[test]
+    fn merge_defaults_preserves_overrides_and_sets_serial_port() {
+        let defaults = json!({"baudrate": 9600, "timeout": 3, "python": "/opt/py"});
+        let cfg = serial_config(&defaults, "/dev/ttyACM0");
+        assert_eq!(cfg["transport"], json!("serial"));
+        assert_eq!(cfg["port"], json!("/dev/ttyACM0"));
+        assert_eq!(cfg["baudrate"], json!(9600));
+        assert_eq!(cfg["timeout"], json!(3));
+        assert_eq!(cfg["python"], json!("/opt/py"));
     }
 }

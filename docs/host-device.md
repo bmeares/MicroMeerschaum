@@ -4,14 +4,26 @@ Install the `micro` plugin on the computer running Meerschaum. Each configured `
 
 ## Connect to a serial port
 
-Start the device's USB session. Close the serial monitor so Meerschaum can open the port. Use the port path for this device (on Linux, a persistent name under `/dev/serial/by-id/` also works). Install the serial driver in a Python 3.11+ environment on the host.
+Start the device's USB session and close any serial monitor so Meerschaum can open the port.
+
+For a single USB-connected board, you can connect immediately with zero configuration:
+
+```sh
+mrsm micro shell
+mrsm micro action show actions
+mrsm show pipes -i micro:auto
+```
+
+You can also target a serial port directly with `-i micro:/dev/ttyACM0` (or `-i micro:COM3` on Windows). When multiple USB serial ports are attached, the plugin probes them with a read-only device-session request and selects the responding MicroMeerschaum device (or lists matching ports if more than one answers).
+
+On Linux and macOS, USB serial works with stock `python3` using Python's standard library (`termios`/`fcntl`/`select`). Installing `pyserial` is optional on POSIX and required on Windows:
 
 ```sh
 python3 -m venv ~/.venvs/micro-transport
 ~/.venvs/micro-transport/bin/python -m pip install pyserial
 ```
 
-Add the following entries to the host's Meerschaum configuration, setting the absolute paths for your machine. The example is a complete `MRSM_CONFIG` overlay. The connector's optional `python` selects the transport interpreter. The fallback is `MRSM_PYTHON`, then `python3` on PATH.
+To assign a named instance (or customize `baudrate`, `timeout`, or `python`), add a connector under `meerschaum.connectors.micro`. The example below is a complete `MRSM_CONFIG` overlay. The connector's optional `python` selects the transport interpreter (fallback: `MRSM_PYTHON`, then `python3` on PATH). Any settings under `meerschaum.connectors.micro.default` apply to auto-detected ports as well.
 
 ```json
 {
@@ -115,12 +127,13 @@ mrsm copy pipes micro:bench -i sql:local -c sensor -m temperature --sync-data in
 ## Run a device action
 
 ```sh
-mrsm micro action show actions -i micro:bench
+mrsm micro shell
+mrsm micro action show actions
 mrsm micro action 'show pipes -m temperature' -i micro:bench
 mrsm micro shell -i micro:bench
 ```
 
-For the standard desktop shell, run `mrsm -i micro:bench`. Use `show pipes` to inspect the device through the instance connector and `micro action 'show actions'` to ask the device for its commands. Inside `micro shell`, enter the device commands directly. The dedicated prompt uses Meerschaum's configured shell template, result icons, and the Reedline editor. Arrow keys recall actions from this session, Ctrl-R searches its history, and Ctrl-C clears the line. Piped input receives plain replies.
+Omit `-i` (or pass `-i micro:auto` / `-i micro:<port>`) to auto-detect a USB-connected device. For the standard desktop shell, run `mrsm -i micro:auto` or `mrsm -i micro:bench`. Use `show pipes` to inspect the device through the instance connector and `micro action 'show actions'` to ask the device for its commands. Inside `micro shell`, enter the device commands directly. The dedicated prompt uses Meerschaum's configured shell template, result icons, bottom toolbar, persistent history, and the Reedline editor. Arrow keys recall actions across sessions, Ctrl-R searches history, and Ctrl-C clears the line. Piped input receives plain replies.
 
 Quote a whole action line containing flags to pass them to the device. In the prompt, Tab requests the permitted completions from the running device. Enter runs the line once. `exit`, `quit` or Ctrl-D returns to the host. The prompt connects through the configured serial or BLE transport.
 
