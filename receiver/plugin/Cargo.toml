@@ -1,6 +1,6 @@
 [package]
 name = "micro"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "Apache-2.0"
 description = "Meerschaum device instances, actions and durable batch receiver for MicroMeerschaum"
@@ -9,7 +9,7 @@ description = "Meerschaum device instances, actions and durable batch receiver f
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-meerschaum-plugin = "=5.1.5"
+meerschaum-plugin = { version = "=5.1.7", default-features = false }
 micromeerschaum = { path = ".." }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

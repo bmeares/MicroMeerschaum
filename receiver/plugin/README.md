@@ -6,18 +6,28 @@ Its receiver accepts authenticated binary batches and returns a destination rece
 
 ## Install
 
-Install `micro` from the Meerschaum registry on the CLI host, API and worker as applicable. Use Meerschaum 5.1.5 or 5.1.6.
+Install `micro` from the registry on each Meerschaum host that uses the plugin (CLI, API or worker).
 
 ```sh
 mrsm install plugins micro
 ```
 
-Alternatively, on Linux x86-64 with glibc, extract the GitHub release archive into the plugin directory used by the API and worker. It supplies `micro/plugin.toml` and `micro/libmicro.so`. [Download the Linux plugin](https://github.com/bmeares/MicroMeerschaum/releases/download/v0.2.1/micro-0.2.1-linux-x86_64.tar.gz) · [Release source](https://github.com/bmeares/MicroMeerschaum/archive/refs/tags/v0.2.1.tar.gz)
+Meerschaum 5.1.7 installs a prebuilt library when the registry has one for the host's target. For a source install, install Cargo first. Cargo builds the bundled receiver using the dependency versions in `Cargo.lock`.
+
+For an offline Linux x86-64 host with glibc 2.28 or newer, download the binary archive on a connected machine and copy it to the host.
+
+```sh
+curl -fS -H 'x-mrsm-plugin-target: x86_64-unknown-linux-gnu' \
+    https://api.mrsm.io/plugins/micro -o micro-linux-x86_64.tar.gz
+tar -tzf micro-linux-x86_64.tar.gz micro/libmicro.so
+```
+
+Extract the archive into the host's plugin directory.
 
 ```sh
 export MRSM_PLUGINS_DIR="${MRSM_PLUGINS_DIR:-$HOME/.config/meerschaum/plugins}"
 mkdir -p "$MRSM_PLUGINS_DIR"
-tar -xzf micro-0.2.1-linux-x86_64.tar.gz -C "$MRSM_PLUGINS_DIR"
+tar -xzf micro-linux-x86_64.tar.gz -C "$MRSM_PLUGINS_DIR"
 ```
 
 **Upgrading from `mm_receiver` 0.1.0.** Stop the API and its replay jobs. Move the old package outside every Meerschaum plugin directory. In the configuration used by the API and worker, rename the `plugins.mm_receiver` section to `plugins.micro`. Keep its contents, including any environment-variable references, database connection, grants and output mappings. For an environment-managed configuration, make the same key rename in the deployment source.
@@ -87,7 +97,7 @@ print(pipe.get_docs(limit=10))
 
 ## Verify independently
 
-With Python, `mrsm` 5.1.5 and OpenSSL available, run these from the repository root. The second command starts and removes a disposable PostgreSQL 18 Docker container. Both runs install a freshly built library into a temporary Meerschaum root, provision scoped tokens, serve TLS on loopback and validate the server certificate.
+With Python, `mrsm` 5.1.7 and OpenSSL available, run these from the repository root. The second command starts and removes a disposable PostgreSQL 18 Docker container. Both runs install a freshly built library into a temporary Meerschaum root, provision scoped tokens, serve TLS on loopback and validate the server certificate.
 
 ```sh
 python receiver/plugin/tests/deployment.py --library receiver/plugin/target/release/libmicro.so
@@ -97,3 +107,17 @@ python receiver/plugin/tests/deployment.py --library receiver/plugin/target/rele
 Add `--micropython /path/to/mm-unix/micropython` to exercise the first-reading application and generated configuration with the Unix MicroPython binding, a simulated integer temperature sensor, a live TLS upload and a read from the ordinary Pipe.
 
 The test restarts the API after a lost reply, races two authorized routes, compares the retained bytes, submits a conflicting batch, and replays a correction that arrived before its original. It induces a database checkpoint failure after an ordinary row commits, locks and unlocks the destination Pipe, restores an evicted record, and verifies that a parser error leaves the raw receipt intact.
+
+## Package for a registry
+
+Run the packager from the repository root. The first command produces a portable source distribution. For an x86-64 Linux release, build the library with the locked dependencies on a glibc 2.28 build host, then package it separately.
+
+```sh
+python3 receiver/package.py dist/micro-0.2.3-source.tar.gz
+cargo build --manifest-path receiver/plugin/Cargo.toml --release --locked
+python3 receiver/package.py dist/micro-0.2.3-linux-x86_64.tar.gz \
+    --library receiver/plugin/target/release/libmicro.so
+sha256sum dist/micro-0.2.3-*.tar.gz
+```
+
+Register the source archive first. When adding the binary for `x86_64-unknown-linux-gnu`, supply the SHA-256 of that exact compressed source archive as `source_sha256`.

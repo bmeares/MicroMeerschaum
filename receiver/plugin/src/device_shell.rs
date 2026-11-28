@@ -846,7 +846,7 @@ fn render_toolbar(
 
     let left_w = runs_width(&left);
     let right_w = runs_width(&right);
-    if left_w + right_w + 1 <= cols {
+    if left_w + right_w < cols {
         let mut runs = left;
         runs.push(ToolbarRun::plain(" ".repeat(cols - left_w - right_w)));
         runs.extend(right);

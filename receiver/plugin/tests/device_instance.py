@@ -142,6 +142,7 @@ def _open_shell_pty(extra_env=None, cols=80, rows=24):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     env = dict(os.environ)
+    env.pop("NO_COLOR", None)
     if extra_env:
         env.update(extra_env)
     proc = subprocess.Popen(
@@ -386,7 +387,9 @@ def shell(device):
         wait_prompt()
         # Ctrl-R searches persistent history for "--help" -> "show pipes --help".
         os.write(master, b"\x12show pipes --h")
-        until(b"show pipes --help")
+        # Reedline may highlight the matching prefix with SGR codes.
+        history_match = re.sub(rb"\x1b\[[0-9;]*m", b"", until(b"elp"))
+        assert b"show pipes --help" in history_match, history_match
         # First Enter exits reverse-search with the match in the buffer; second Enter executes it.
         os.write(master, b"\r")
         until(b"\x1b[?25h")

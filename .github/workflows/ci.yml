@@ -79,6 +79,7 @@ jobs:
       - run: |
           python receiver/plugin/tests/device_instance.py \
               --library receiver/plugin/target/debug/libmicro.so --python "$(command -v python)"
+      - run: python receiver/plugin/tests/deployment.py --library receiver/plugin/target/debug/libmicro.so
 
   vectors:
     runs-on: ubuntu-24.04

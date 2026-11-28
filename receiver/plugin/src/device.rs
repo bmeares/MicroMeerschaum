@@ -425,7 +425,7 @@ fn write(config: &Value, label: &str, key: &Key, data: Option<Frame>) -> Result<
         return Err(error("A device write accepts at most 128 rows."));
     }
     let dtypes = frame.dtypes();
-    let mut rows = frame.to_rows();
+    let mut rows = frame.try_to_rows()?;
     for row in &mut rows {
         for (name, value) in row.as_object_mut().expect("frame row").iter_mut() {
             if dtypes.get(name).is_some_and(|t| t.starts_with("datetime")) && !value.is_null() {

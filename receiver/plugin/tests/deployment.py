@@ -1,4 +1,4 @@
-"""Exercise an installed native receiver over TLS. Run in a fresh Meerschaum 5.1.5 environment."""
+"""Exercise an installed native receiver over TLS."""
 
 import argparse
 import concurrent.futures
@@ -17,6 +17,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 PLUGIN = Path(__file__).resolve().parents[1]
@@ -146,11 +147,15 @@ def serve(root, env):
             proc.wait()
 
 
+OBSERVED_US = 1_700_000_000_123_456
+OBSERVED_AT = datetime(2023, 11, 14, 22, 13, 20, 123456, tzinfo=timezone.utc)
+
+
 def doc(value):
-    # Two signed integers in the document fixture profile, with an unchanged logical row key.
+    # The timestamp is the logical row key shared by all corrections.
     return (
-        b"MMDC\x01\x02\x04tick\x03"
-        + struct.pack("<q", 1)
+        b"MMDC\x01\x02\x04tick\x06"
+        + struct.pack("<q", OBSERVED_US)
         + b"\x05value\x03"
         + struct.pack("<q", value)
     )
@@ -245,7 +250,6 @@ def qualify(root, library, db, micropython=None, previous_library=None):
     import meerschaum as mrsm
     from meerschaum.core import Token, User
 
-    assert mrsm.__version__ in ("5.1.5", "5.1.6")
     conn = mrsm.get_connector("sql:mmtest")
     user = User(
         "device",
@@ -287,7 +291,7 @@ def qualify(root, library, db, micropython=None, previous_library=None):
                 "metric": "temperature",
                 "instance": "sql:mmtest",
                 "columns": {"datetime": "tick"},
-                "dtypes": {"tick": "int", "value": "int"},
+                "dtypes": {"tick": "datetime", "value": "int"},
             }
         ],
     }
@@ -405,14 +409,24 @@ def qualify(root, library, db, micropython=None, previous_library=None):
             if db
             else "CREATE TRIGGER interrupt_checkpoint BEFORE INSERT ON mm_progress BEGIN SELECT RAISE(FAIL,'interrupted'); END"
         )
-        assert (
-            subprocess.run(
-                replay, env=env, cwd=root, capture_output=True, check=False
-            ).returncode
-            != 0
-        )
+        interrupted = subprocess.run(replay, env=env, cwd=root, capture_output=True)
+        assert interrupted.returncode != 0
         pipe = mrsm.Pipe("weather", "temperature", instance="sql:mmtest")
-        assert pipe.get_docs(limit=5) == [{"tick": 1, "value": 11}]
+
+        def check_row(pipe, value):
+            [row] = pipe.get_docs(limit=5)
+            observed = row["tick"]
+            if isinstance(observed, str):
+                observed = datetime.fromisoformat(observed)
+            # SQLite stores the normalized timestamp without a timezone suffix.
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            assert (observed, row["value"]) == (OBSERVED_AT, value), row
+
+        assert pipe.exists(), interrupted.stdout + interrupted.stderr
+        types = pipe.get_columns_types()
+        assert "time" in types["tick"].lower(), types
+        check_row(pipe, 11)
         assert scalar("SELECT count(*) FROM mm_progress") == 0
         execute(
             "ALTER TABLE mm_progress DROP CONSTRAINT interrupt_checkpoint"
@@ -420,7 +434,7 @@ def qualify(root, library, db, micropython=None, previous_library=None):
             else "DROP TRIGGER interrupt_checkpoint"
         )
         checked_command(*replay, env=env, cwd=root)
-        assert pipe.get_docs(limit=5) == [{"tick": 1, "value": 44}]
+        check_row(pipe, 44)
         ok, msg = pipe.lock("sync")
         assert ok, msg
         assert post(v1, batch([record(3, doc(55))]), direct) == (200, expected(3))
@@ -430,13 +444,13 @@ def qualify(root, library, db, micropython=None, previous_library=None):
             ).returncode
             != 0
         )
-        assert pipe.get_docs(limit=5) == [{"tick": 1, "value": 44}]
+        check_row(pipe, 44)
         other = mrsm.Pipe("weather", "second_output", instance="sql:mmtest")
-        assert other.get_docs(limit=5) == [{"tick": 1, "value": 55}]
+        check_row(other, 55)
         ok, msg = pipe.unlock("sync")
         assert ok, msg
         checked_command(*replay, env=env, cwd=root)
-        assert pipe.get_docs(limit=5) == [{"tick": 1, "value": 55}]
+        check_row(pipe, 55)
         assert post(v1, batch(), direct) == (200, expected(3))
         assert post(v1, batch([record(6, loss(2, 4, 5), kind=1)]), direct) == (
             200,
@@ -446,7 +460,7 @@ def qualify(root, library, db, micropython=None, previous_library=None):
         checked_command(*replay, env=env, cwd=root)
         assert post(v1, batch([record(4, doc(41))]), direct) == (200, expected(7))
         checked_command(*replay, env=env, cwd=root)
-        assert pipe.get_docs(limit=5) == [{"tick": 1, "value": 77}]
+        check_row(pipe, 77)
         # A configured document parser rejects an opaque payload after ingress has acknowledged it.
         assert post(v1, batch([record(8, b"opaque")]), direct) == (200, expected(8))
         assert (
@@ -456,7 +470,7 @@ def qualify(root, library, db, micropython=None, previous_library=None):
             != 0
         )
         assert post(v1, batch(), direct) == (200, expected(8))
-        assert pipe.get_docs(limit=5) == [{"tick": 1, "value": 77}]
+        check_row(pipe, 77)
         status_table = checked_command(
             "mrsm", "micro", "receiver", "status", env=env, cwd=root
         ).decode()
